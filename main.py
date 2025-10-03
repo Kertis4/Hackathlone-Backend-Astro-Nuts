@@ -17,8 +17,8 @@ if response.status_code == 200:
     data = response.json()
     asteroids = data["near_earth_objects"][date]
 
-# Print first 2 asteroids only
-for asteroid in asteroids[:ASTEROID_COUNT]:
-    print(json.dumps(asteroid, indent=2))
+    # Print first 2 asteroids only
+    for asteroid in asteroids[:ASTEROID_COUNT]:
+        print(json.dumps(asteroid, indent=2))
 else:
     print("Error:", response.status_code)
