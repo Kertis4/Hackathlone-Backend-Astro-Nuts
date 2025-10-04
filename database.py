@@ -1,34 +1,24 @@
 import sqlite3
 import requests
-import datetime
+import os
+from dotenv import load_dotenv
+from datetime import datetime, timedelta
 
-# 🔑 Your NASA API key
-API_KEY = "zXWmLUFqfMSNBIfXSfe0JS025dKYVXD81Dp9oEad"
+# Load API key from .env file
+load_dotenv()
+API_KEY = os.getenv("API_KEY")
 
-# Example: Get asteroids between these dates
-START_DATE = datetime.date.today().strftime("%Y-%m-%d")
-END_DATE = (datetime.date.today() + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+# Use the FEED endpoint for latest NEOs
+BASE_URL = f"https://api.nasa.gov/neo/rest/v1/feed?api_key={API_KEY}"
 
-URL = f"https://api.nasa.gov/neo/rest/v1/feed?start_date={START_DATE}&end_date={END_DATE}&api_key={API_KEY}"
-
-# Fetch data from NASA API
-response = requests.get(URL)
-data = response.json()
-
-# --- DEBUG: show response in case of error ---
-if "near_earth_objects" not in data:
-    print("❌ Error from NASA API:", data)
-    exit()
-
-# Connect to SQLite (creates file if not exists)
+# Connect to SQLite database
 conn = sqlite3.connect("asteroids.db")
 cursor = conn.cursor()
 
-# Create main asteroids table
+# Create tables
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS asteroids (
-    id TEXT PRIMARY KEY,
-    neo_reference_id TEXT,
+    neo_reference_id TEXT PRIMARY KEY,
     name TEXT,
     nasa_jpl_url TEXT,
     absolute_magnitude_h REAL,
@@ -37,23 +27,20 @@ CREATE TABLE IF NOT EXISTS asteroids (
 );
 """)
 
-# Create asteroid diameters table
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS asteroid_diameters (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
     asteroid_id TEXT,
     unit TEXT,
     diameter_min REAL,
     diameter_max REAL,
-    FOREIGN KEY (asteroid_id) REFERENCES asteroids(id)
+    PRIMARY KEY (asteroid_id, unit),
+    FOREIGN KEY (asteroid_id) REFERENCES asteroids(neo_reference_id)
 );
 """)
 
-# Create close approaches table
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS close_approaches (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    asteroid_id TEXT,
+    asteroid_id TEXT PRIMARY KEY,
     close_approach_date TEXT,
     close_approach_date_full TEXT,
     epoch_date_close_approach INTEGER,
@@ -65,21 +52,37 @@ CREATE TABLE IF NOT EXISTS close_approaches (
     miss_distance_km REAL,
     miss_distance_miles REAL,
     orbiting_body TEXT,
-    FOREIGN KEY (asteroid_id) REFERENCES asteroids(id)
+    FOREIGN KEY (asteroid_id) REFERENCES asteroids(neo_reference_id)
 );
 """)
 
-# Process each asteroid from the feed
+# Fetch the last 7 days of asteroid data
+end_date = datetime.today().date()
+start_date = end_date - timedelta(days=7)
+
+response = requests.get(
+    f"{BASE_URL}&start_date={start_date}&end_date={end_date}"
+)
+data = response.json()
+
+if "near_earth_objects" not in data:
+    print("Error from NASA API:", data)
+    conn.close()
+    exit()
+
+inserted_count = 0
+
 for date, asteroids in data["near_earth_objects"].items():
     for asteroid in asteroids:
-        # Insert asteroid main info
+        neo_id = asteroid["neo_reference_id"]
+
+        # Insert asteroid basic info
         cursor.execute("""
         INSERT OR REPLACE INTO asteroids
-        (id, neo_reference_id, name, nasa_jpl_url, absolute_magnitude_h, is_potentially_hazardous, is_sentry_object)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        (neo_reference_id, name, nasa_jpl_url, absolute_magnitude_h, is_potentially_hazardous, is_sentry_object)
+        VALUES (?, ?, ?, ?, ?, ?)
         """, (
-            asteroid["id"],
-            asteroid["neo_reference_id"],
+            neo_id,
             asteroid["name"],
             asteroid["nasa_jpl_url"],
             asteroid["absolute_magnitude_h"],
@@ -87,30 +90,30 @@ for date, asteroids in data["near_earth_objects"].items():
             int(asteroid.get("is_sentry_object", False))
         ))
 
-        # Insert diameter data
+        # Insert diameter data (will overwrite because PRIMARY KEY is asteroid_id)
         for unit, values in asteroid["estimated_diameter"].items():
             cursor.execute("""
-            INSERT INTO asteroid_diameters
+            INSERT OR REPLACE INTO asteroid_diameters
             (asteroid_id, unit, diameter_min, diameter_max)
             VALUES (?, ?, ?, ?)
             """, (
-                asteroid["id"],
+                neo_id,
                 unit,
                 values["estimated_diameter_min"],
                 values["estimated_diameter_max"]
             ))
 
-        # Insert close approach data
+        # Insert close approach data (also overwrites since asteroid_id is PRIMARY KEY)
         for approach in asteroid["close_approach_data"]:
             cursor.execute("""
-            INSERT INTO close_approaches
+            INSERT OR REPLACE INTO close_approaches
             (asteroid_id, close_approach_date, close_approach_date_full,
             epoch_date_close_approach, velocity_km_s, velocity_km_h, velocity_mi_h,
             miss_distance_astronomical, miss_distance_lunar, miss_distance_km, miss_distance_miles,
             orbiting_body)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                asteroid["id"],
+                neo_id,
                 approach["close_approach_date"],
                 approach.get("close_approach_date_full"),
                 approach.get("epoch_date_close_approach"),
@@ -124,12 +127,12 @@ for date, asteroids in data["near_earth_objects"].items():
                 approach["orbiting_body"]
             ))
 
-# Commit changes & close
+        inserted_count += 1
+
+print(f"Inserted {inserted_count} asteroids from {start_date} to {end_date}")
+
+# Commit and close
 conn.commit()
 
-print("\nInserted asteroids:")
-for row in cursor.execute("SELECT id, name, is_potentially_hazardous FROM asteroids LIMIT 10"):
-    print(row)
-
 conn.close()
-print("\nAll asteroid data inserted successfully 🚀")
+print("\nAll asteroid data inserted successfully (using FEED API).")
