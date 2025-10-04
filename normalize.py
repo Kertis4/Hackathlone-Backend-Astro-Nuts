@@ -1,5 +1,19 @@
 import json
 
+def extract_asteroids_from_feed(feed_response):
+    """
+    Extract and flatten all asteroid data from the /feed endpoint response.
+    Returns a list of asteroid dicts.
+    """
+    all_asteroids = []
+    near_earth_objects = feed_response.get("near_earth_objects", {})
+    
+    for date in near_earth_objects:
+        all_asteroids.extend(near_earth_objects[date])
+    
+    return all_asteroids
+
+
 def normalize_asteroid(raw_data):
 
     diameter = raw_data["estimated_diameter"]
@@ -99,3 +113,4 @@ sample_asteroid_data = {
 }
 
 
+print(json.dumps(normalized_batch, indent=2))
