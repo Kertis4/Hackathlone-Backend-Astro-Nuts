@@ -49,7 +49,32 @@ def get_asteroids(date: str):
 #gets ths asteroids from the database instead of the api
 @app.get("/database/asteroids")
 def get_asteroids_from_db():
-    normalize_asteroids()
+    query = """
+    SELECT
+        A.id AS id,
+        A.name AS name,
+        A.nasa_jpl_url AS nasa_jpl_url,
+        A.is_potentially_hazardous AS is_potentially_hazardous_asteroid,
+        D.diameter_min AS estimated_diameter_km_min,
+        D.diameter_max AS estimated_diameter_km_max,
+        C.close_approach_date AS close_approach_date,
+        C.miss_distance_km AS miss_distance_km,
+        C.velocity_km_s AS relative_velocity_km_s
+    FROM Asteroids A
+    JOIN close_approaches C ON A.id = C.asteroid_id
+    JOIN asteroid_diameters D ON A.id = D.asteroid_id
+    """
+
+    cur.execute(query)
+    rows = cur.fetchall()
+    
+
+    # Convert to list of dicts for JSON response
+    columns = [desc[0] for desc in cur.description]
+    results = [dict(zip(columns, row)) for row in rows]
+
+    print(json.dumps(results, indent=4))
+    normalize_asteroids(id)
             
         
 
