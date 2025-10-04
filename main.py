@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 import json 
 from fastapi import FastAPI, HTTPException
 import uvicorn
-from normalize import normalize_multiple_asteroids
+from normalize import normalize_asteroid
 
 from typing import List, Dict, Any    
 
@@ -27,10 +27,8 @@ def get_json_asteroid(date: str):
         data = response.json()
         asteroids = data["near_earth_objects"][date]
 
-        # Print first 2 asteroids only
-        for asteroid in asteroids:
-            #print(json.dumps(asteroid, indent=2))
-            print(normalize_multiple_asteroids(json.dumps(asteroid, indent=2)))
+        normalized = [normalize_asteroid(a) for a in asteroids]
+        return normalized
     else:
         print("Error:", response.status_code)
 

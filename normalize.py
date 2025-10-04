@@ -1,9 +1,7 @@
 import json
 
-def normalize_asteroid_data(raw_data):
-    """
-    Normalize a single asteroid entry from NASA's NEO API into a flat dictionary.
-    """
+def normalize_asteroid(raw_data):
+
     diameter = raw_data["estimated_diameter"]
     normalized = {
         "id": raw_data.get("id"),
@@ -47,18 +45,6 @@ def normalize_asteroid_data(raw_data):
 
     return normalized
 
-
-def normalize_multiple_asteroids(data_list):
-    """
-    Normalize a list of asteroid objects from NASA's NEO API.
-
-    Parameters:
-        data_list (list): List of raw asteroid JSON objects.
-
-    Returns:
-        list: List of normalized asteroid dictionaries.
-    """
-    return [normalize_asteroid_data(asteroid) for asteroid in data_list]
 
 
 # ---------- Sample Data ---------- #
@@ -112,8 +98,4 @@ sample_asteroid_data = {
     "is_sentry_object": False
 }
 
-# ---------- Run & Output ---------- #
-asteroid_batch = [sample_asteroid_data, sample_asteroid_data]  # Simulating a list of multiple entries
-normalized_batch = normalize_multiple_asteroids(asteroid_batch)
 
-print(json.dumps(normalized_batch, indent=2))
