@@ -12,4 +12,10 @@ venv/
 # API keys / secrets
 .env
 
+#test file
+frontTest.py
+
+.idea
+
+
 asteroids.db
