@@ -11,3 +11,5 @@ venv/
 
 # API keys / secrets
 .env
+
+asteroids.db

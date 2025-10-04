@@ -1,5 +1,19 @@
 import json
 
+def extract_asteroids_from_feed(feed_response):
+    """
+    Extract and flatten all asteroid data from the /feed endpoint response.
+    Returns a list of asteroid dicts.
+    """
+    all_asteroids = []
+    near_earth_objects = feed_response.get("near_earth_objects", {})
+    
+    for date in near_earth_objects:
+        all_asteroids.extend(near_earth_objects[date])
+    
+    return all_asteroids
+
+
 def normalize_asteroid_data(raw_data):
     """
     Normalize a single asteroid entry from NASA's NEO API into a flat dictionary.
@@ -116,4 +130,21 @@ sample_asteroid_data = {
 asteroid_batch = [sample_asteroid_data, sample_asteroid_data]  # Simulating a list of multiple entries
 normalized_batch = normalize_multiple_asteroids(asteroid_batch)
 
+print(json.dumps(normalized_batch, indent=2))
+
+# Example: Suppose you got this from the real /feed endpoint (mocked here)
+fake_feed_response = {
+    "near_earth_objects": {
+        "2025-10-01": [sample_asteroid_data],
+        "2025-10-02": [sample_asteroid_data, sample_asteroid_data]
+    }
+}
+
+# Step 1: Extract asteroid list
+asteroid_batch = extract_asteroids_from_feed(fake_feed_response)
+
+# Step 2: Normalize
+normalized_batch = normalize_multiple_asteroids(asteroid_batch)
+
+# Step 3: Output
 print(json.dumps(normalized_batch, indent=2))
