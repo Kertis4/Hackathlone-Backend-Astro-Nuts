@@ -1,104 +1,71 @@
-# main.py
+
 import os
-from datetime import date as Date
 from typing import Dict, Any, List
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
+from openai import OpenAI
 from dotenv import load_dotenv
 import json 
 from fastapi import FastAPI, HTTPException
 import uvicorn
-from normalize import normalize_asteroid
-from openai import OpenAI
-
+from normalize import normalize_asteroids
+import datetime
+import sqlite3
 from typing import List, Dict, Any    
 import requests
 
 load_dotenv()
 API_KEY = os.getenv("API_KEY")
 OPEN_AI_KEY = os.getenv("OPEN_AI_KEY")
+DATE = datetime.date.today().strftime('%Y-%m-%d')
 client = OpenAI(api_key = OPEN_AI_KEY)
-url = f"https://api.nasa.gov/neo/rest/v1/feed?start_date=2025-10-01&end_date=2025-10-07&api_key={API_KEY}"
 app = FastAPI(title="NASA NEO Data Normalizer")
-
-# (Optional) allow your browser/frontend to call it
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],   # restrict in production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-def normalize_asteroid(a: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "id": a.get("id"),
-        "name": a.get("name"),
-        "hazardous": a.get("is_potentially_hazardous_asteroid"),
-        "absolute_magnitude_h": a.get("absolute_magnitude_h"),
-        "close_approach_data": a.get("close_approach_data", []),
-        "nasa_jpl_url": a.get("nasa_jpl_url"),
-    }
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-@app.get("/asteroids")
-def get_asteroids(
-    start_date: Date = Query(..., description="YYYY-MM-DD"),
-    end_date:   Date = Query(..., description="YYYY-MM-DD"),
-) -> List[Dict[str, Any]]:
-    if not API_KEY:
-        raise HTTPException(500, "API_KEY missing. Add API_KEY=... to your .env")
-
-    if end_date < start_date:
-        raise HTTPException(400, "end_date must be >= start_date")
-
-    # NASA feed allows max 7 days inclusive
-    if (end_date - start_date).days + 1 > 7:
-        raise HTTPException(400, "Range too large. Use at most 7 days inclusive.")
-
-    url = "https://api.nasa.gov/neo/rest/v1/feed"
-    try:
-        r = requests.get(
-            url,
-            params={"start_date": str(start_date), "end_date": str(end_date), "api_key": API_KEY},
-            timeout=30,
-            headers={"User-Agent": "neo-client/1.0"}  # harmless; avoids odd blocks
-        )
-    except requests.RequestException as e:
-        raise HTTPException(502, f"NASA API request failed: {e}")
-
-    if r.status_code != 200:
-        # show NASA's actual message to distinguish "invalid key" vs "rate limit"
-        try:
-            j = r.json()
-            msg = j.get("error_message") or j.get("message") or j
-        except Exception:
-            msg = r.text[:500]
-        raise HTTPException(r.status_code, f"NASA API error: {msg}")
-
-    data = r.json()
-    days = data.get("near_earth_objects") or {}
-    out: List[Dict[str, Any]] = []
-    for _, items in days.items():
-        out.extend(items)
-    return [normalize_asteroid(a) for a in out]
-
-# Optional: run with `python main.py` (handy on Windows/Task Scheduler)
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        "main:app",
-        host="127.0.0.1",  # keep localhost for safety
-        port=8080,
-        reload=False       # True for dev hot-reload
-    )
-
-DATE = "2025-10-05"
+START_DATE = datetime.date.today().strftime("%Y-%m-%d")
+END_DATE = (datetime.date.today() + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+URL = f"https://api.nasa.gov/neo/rest/v1/feed?start_date={START_DATE}&end_date={END_DATE}&api_key={API_KEY}"
+conn = sqlite3.connect("asteroids.db")
+cur = conn.cursor()
 
 
+
+
+
+#was used to get asteroids from the api not used anymore since db code also a bit messed up 
+response = requests.get(URL)
+@app.get("/asteroids/{date}")
+def get_asteroids(date: str):
+  
+
+    if response.status_code == 200:
+        data = response.json()
+        asteroids = data["near_earth_objects"][date]
+
+        for a in asteroids:
+            normalized = normalize_asteroid(a)
+            print(normalized) 
+        return normalized
+    else:
+        print("Error:", response.status_code)
+
+
+#gets ths asteroids from the database instead of the api
+@app.get("/database/asteroids")
+def get_asteroids_from_db():
+    normalize_asteroids()
+            
+        
+
+
+# if __name__ == "__main__":
+#     import uvicorn
+#     uvicorn.run(
+#         "main:app",
+#         host="127.0.0.1",  # keep localhost for safety
+#         port=8000,
+#         reload=False       # True for dev hot-reload
+#     )
+
+
+
+#print(get_asteroids(DATE))             
 
 
 @app.get("/ai/generalSummary")
@@ -115,16 +82,22 @@ def ai_generalSummary():
   temperature = 1
   )
     print(response.choices[0].message.content)
-    
+
+
+
+
 @app.post("/ai/individualReport/{id}")
 def ai_individualReport(id):
-    response = client.completions.create(
+    cur.execute("SELECT * FROM users WHERE id = ?", (id,))
+    asteroid = cur.fetchone()
+    print(f"test inin: {asteroid}")
+    response = client.chat.completions.create(
   model="gpt-4o",
   messages = [
     {"role": "system",
      "content": "You are a profesional astronomer/phycisist who is explaining to policy makers and must discuss asteroid impact scenarios, predict consequences, and evaluate potential mitigation strategies given data on an asteroid in near earth orbit, avoid jargon where applicable"}, 
     {"role": "user",
-     "content": f"{asteroid_by_id(id)}?"}
+     "content": f"{asteroid} please give info about this asteroid for testing purposes"}
     ],
   max_tokens = 1000,  # Maximum output length
   temperature = 1
@@ -173,4 +146,5 @@ TEST_DATA = """
 {'id': '54549130', 'name': '(2025 SO27)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=54549130', 'absolute_magnitude_h': 27.41, 'estimated_diameter_km_min': 0.0087610261, 'estimated_diameter_km_max': 0.01959025, 'estimated_diameter_m_min': 8.7610261497, 'estimated_diameter_m_max': 19.5902500233, 'estimated_diameter_mi_min': 0.0054438476, 'estimated_diameter_mi_max': 0.0121728132, 'estimated_diameter_ft_min': 28.7435250329, 'estimated_diameter_ft_max': 64.2724758865, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-05', 'close_approach_date_full': '2025-Oct-05 14:38', 'epoch_date_close_approach': 1759675080000, 'relative_velocity_km_s': 6.4809213857, 'relative_velocity_km_h': 23331.3169883594, 'relative_velocity_mph': 14497.1730475725, 'miss_distance_au': 0.026392685, 'miss_distance_lunar': 10.266754465, 'miss_distance_km': 3948289.45958095, 'miss_distance_mi': 2453353.30667911, 'orbiting_body': 'Earth'}
  """
 
-ai_generalSummary()
+get_asteroids_from_db()
+#ai_generalSummary()

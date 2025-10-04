@@ -1,4 +1,8 @@
 import json
+import sqlite3
+conn = sqlite3.connect("asteroids.db")
+from collections import defaultdict
+cur = conn.cursor()
 
 def extract_asteroids_from_feed(feed_response):
     """
@@ -13,9 +17,11 @@ def extract_asteroids_from_feed(feed_response):
     
     return all_asteroids
 
-
-def normalize_asteroid(raw_data):
-
+##this is the old normalize dictionary output
+#def normalize_asteroid(raw_data):
+    approach = raw_data["close_approach_data"][0]
+    velocity = approach["relative_velocity"]
+    distance = approach["miss_distance"]
     diameter = raw_data["estimated_diameter"]
     normalized = {
         "id": raw_data.get("id"),
@@ -34,17 +40,8 @@ def normalize_asteroid(raw_data):
         "estimated_diameter_ft_max": diameter["feet"]["estimated_diameter_max"],
 
         "is_potentially_hazardous_asteroid": raw_data.get("is_potentially_hazardous_asteroid"),
-        "is_sentry_object": raw_data.get("is_sentry_object")
-    }
-
-    # Normalize first close approach data if available
-    if raw_data.get("close_approach_data"):
-        approach = raw_data["close_approach_data"][0]
-        velocity = approach["relative_velocity"]
-        distance = approach["miss_distance"]
-
-        normalized.update({
-            "close_approach_date": approach.get("close_approach_date"),
+        "is_sentry_object": raw_data.get("is_sentry_object"),
+        "close_approach_date": approach.get("close_approach_date"),
             "close_approach_date_full": approach.get("close_approach_date_full"),
             "epoch_date_close_approach": approach.get("epoch_date_close_approach"),
             "relative_velocity_km_s": float(velocity["kilometers_per_second"]),
@@ -55,13 +52,61 @@ def normalize_asteroid(raw_data):
             "miss_distance_km": float(distance["kilometers"]),
             "miss_distance_mi": float(distance["miles"]),
             "orbiting_body": approach.get("orbiting_body")
-        })
+    }
 
+
+    #IDEK LIKE JUST IGNORE THIS 
+    # Normalize first close approach data if available
+    # if raw_data.get("close_approach_data"):
+        
+
+    #     normalized.update({
+    #         "close_approach_date": approach.get("close_approach_date"),
+    #         "close_approach_date_full": approach.get("close_approach_date_full"),
+    #         "epoch_date_close_approach": approach.get("epoch_date_close_approach"),
+    #         "relative_velocity_km_s": float(velocity["kilometers_per_second"]),
+    #         "relative_velocity_km_h": float(velocity["kilometers_per_hour"]),
+    #         "relative_velocity_mph": float(velocity["miles_per_hour"]),
+    #         "miss_distance_au": float(distance["astronomical"]),
+    #         "miss_distance_lunar": float(distance["lunar"]),
+    #         "miss_distance_km": float(distance["kilometers"]),
+    #         "miss_distance_mi": float(distance["miles"]),
+    #         "orbiting_body": approach.get("orbiting_body")
+            
+    #     })
+
+    ##json i guess 
+    normalized = json.dumps(normalized)
     return normalized
 
+#this is the new normalize:)) json output from sql yay yippeee AAAAAAAAA
+def normalize_asteroids():  
+    grouped = defaultdict(list)
+for row in results:
+    grouped[row["id"]].append(row)
 
+# Build final JSON structure
+final = []
+for asteroid_id, rows in grouped.items():
+    base = rows[0].copy()
+    base["close_approaches"] = [
+        {
+            "date": r["close_approach_date"],
+            "miss_distance_km": r["miss_distance_km"],
+            "velocity_km_s": r["relative_velocity_km_s"],
+        }
+        for r in rows
+    ]
 
-# ---------- Sample Data ---------- #
+    # Remove duplicate fields from the base
+    for key in ["close_approach_date", "miss_distance_km", "relative_velocity_km_s"]:
+        base.pop(key, None)
+
+    final.append(base)
+
+print(json.dumps(final, indent=4))
+
+    
 sample_asteroid_data = {
     "links": {
         "self": "http://api.nasa.gov/neo/rest/v1/neo/2465633?api_key=DEMO_KEY"
@@ -113,4 +158,4 @@ sample_asteroid_data = {
 }
 
 
-print(json.dumps(normalized_batch, indent=2))
+#print(json.dumps(normalized_batch, indent=2))

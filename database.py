@@ -1,28 +1,21 @@
 import sqlite3
 import requests
-import datetime
+import os
+from dotenv import load_dotenv
 
-# 🔑 Your NASA API key
-API_KEY = "zXWmLUFqfMSNBIfXSfe0JS025dKYVXD81Dp9oEad"
 
-# Example: Get asteroids between these dates
-START_DATE = datetime.date.today().strftime("%Y-%m-%d")
-END_DATE = (datetime.date.today() + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+# Load API key
+load_dotenv()
+API_KEY = os.getenv("API_KEY")
 
-URL = f"https://api.nasa.gov/neo/rest/v1/feed?start_date={START_DATE}&end_date={END_DATE}&api_key={API_KEY}"
 
-# Fetch data from NASA API
-response = requests.get(URL)
-data = response.json()
+BASE_URL = f"https://api.nasa.gov/neo/rest/v1/neo/browse?api_key={API_KEY}"
 
-# --- DEBUG: show response in case of error ---
-if "near_earth_objects" not in data:
-    print("❌ Error from NASA API:", data)
-    exit()
 
 # Connect to SQLite (creates file if not exists)
 conn = sqlite3.connect("asteroids.db")
 cursor = conn.cursor()
+
 
 # Create main asteroids table
 cursor.execute("""
@@ -37,6 +30,7 @@ CREATE TABLE IF NOT EXISTS asteroids (
 );
 """)
 
+
 # Create asteroid diameters table
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS asteroid_diameters (
@@ -48,6 +42,7 @@ CREATE TABLE IF NOT EXISTS asteroid_diameters (
     FOREIGN KEY (asteroid_id) REFERENCES asteroids(id)
 );
 """)
+
 
 # Create close approaches table
 cursor.execute("""
@@ -69,9 +64,33 @@ CREATE TABLE IF NOT EXISTS close_approaches (
 );
 """)
 
-# Process each asteroid from the feed
-for date, asteroids in data["near_earth_objects"].items():
+
+# Pagination through browse endpoint
+page = 0
+max_pages = 5  # adjust this to fetch more results (each page has up to 200 asteroids)
+
+
+while page < max_pages:
+    response = requests.get(f"{BASE_URL}&page={page}&size=200")
+    data = response.json()
+
+
+    if "near_earth_objects" not in data:
+        print("Error from NASA API:", data)
+        break
+
+
+    asteroids = data["near_earth_objects"]
+    if not asteroids:
+        break
+
+
     for asteroid in asteroids:
+        # Only insert hazardous asteroids
+        if not asteroid["is_potentially_hazardous_asteroid"]:
+            continue
+
+
         # Insert asteroid main info
         cursor.execute("""
         INSERT OR REPLACE INTO asteroids
@@ -87,6 +106,7 @@ for date, asteroids in data["near_earth_objects"].items():
             int(asteroid.get("is_sentry_object", False))
         ))
 
+
         # Insert diameter data
         for unit, values in asteroid["estimated_diameter"].items():
             cursor.execute("""
@@ -99,6 +119,7 @@ for date, asteroids in data["near_earth_objects"].items():
                 values["estimated_diameter_min"],
                 values["estimated_diameter_max"]
             ))
+
 
         # Insert close approach data
         for approach in asteroid["close_approach_data"]:
@@ -124,12 +145,18 @@ for date, asteroids in data["near_earth_objects"].items():
                 approach["orbiting_body"]
             ))
 
-# Commit changes & close
+
+    print(f"✅ Processed page {page}")
+    page += 1
+
+
 conn.commit()
 
-print("\nInserted asteroids:")
+
+print("\nInserted hazardous asteroids:")
 for row in cursor.execute("SELECT id, name, is_potentially_hazardous FROM asteroids LIMIT 10"):
     print(row)
 
+
 conn.close()
-print("\nAll asteroid data inserted successfully 🚀")
+print("\nAll hazardous asteroid data inserted successfully")
