@@ -1,175 +1,256 @@
-
 import os
 from typing import Dict, Any, List
 from openai import OpenAI
 from dotenv import load_dotenv
 import json 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware  # ADD THIS
 import uvicorn
-from normalize import normalize_asteroids
+from normalize import normalize_asteroids, get_all_asteroid_ids, get_all_asteroids_normalized
 import datetime
 import sqlite3
-from typing import List, Dict, Any    
 import requests
 
+
+# Load environment variables
 load_dotenv()
 API_KEY = os.getenv("API_KEY")
 OPEN_AI_KEY = os.getenv("OPEN_AI_KEY")
-DATE = datetime.date.today().strftime('%Y-%m-%d')
-client = OpenAI(api_key = OPEN_AI_KEY)
+
+# Initialize OpenAI client
+client = OpenAI(api_key=OPEN_AI_KEY)
+
+# Initialize FastAPI app
 app = FastAPI(title="NASA NEO Data Normalizer")
+
+# ============================================================================
+# CONFIGURE CORS
+# ============================================================================
+origins = [
+    "http://localhost:5173",      # Vite default
+    "http://localhost:3000",      # Create React App default
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:3000",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# Date configurations
+DATE = datetime.date.today().strftime('%Y-%m-%d')
 START_DATE = datetime.date.today().strftime("%Y-%m-%d")
 END_DATE = (datetime.date.today() + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
 URL = f"https://api.nasa.gov/neo/rest/v1/feed?start_date={START_DATE}&end_date={END_DATE}&api_key={API_KEY}"
-conn = sqlite3.connect("asteroids.db")
+
+# Database connection
+conn = sqlite3.connect("asteroids.db", check_same_thread=False)
 cur = conn.cursor()
 
 
+# ============================================================================
+# ASTEROID DATABASE ENDPOINTS
+# ============================================================================
 
-
-
-#was used to get asteroids from the api not used anymore since db code also a bit messed up 
-response = requests.get(URL)
-@app.get("/asteroids/{date}")
-def get_asteroids(date: str):
-  
-
-    if response.status_code == 200:
-        data = response.json()
-        asteroids = data["near_earth_objects"][date]
-
-        for a in asteroids:
-            normalized = normalize_asteroid(a)
-            print(normalized) 
-        return normalized
-    else:
-        print("Error:", response.status_code)
-
-
-#gets ths asteroids from the database instead of the api
 @app.get("/database/asteroids")
 def get_asteroids_from_db():
-    query = """
-    SELECT
-        A.id AS id,
-        A.name AS name,
-        A.nasa_jpl_url AS nasa_jpl_url,
-        A.is_potentially_hazardous AS is_potentially_hazardous_asteroid,
-        D.diameter_min AS estimated_diameter_km_min,
-        D.diameter_max AS estimated_diameter_km_max,
-        C.close_approach_date AS close_approach_date,
-        C.miss_distance_km AS miss_distance_km,
-        C.velocity_km_s AS relative_velocity_km_s
-    FROM Asteroids A
-    JOIN close_approaches C ON A.id = C.asteroid_id
-    JOIN asteroid_diameters D ON A.id = D.asteroid_id
     """
+    Get all asteroids from database in normalized format
+    Returns: List of all asteroids with complete data
+    """
+    return get_all_asteroids_normalized()
 
-    cur.execute(query)
-    rows = cur.fetchall()
+
+@app.get("/database/asteroids/ids")
+def get_all_ids():
+    """
+    Get list of all asteroid IDs in database
+    Returns: JSON with array of asteroid IDs
+    """
+    return {"asteroid_ids": get_all_asteroid_ids()}
+
+
+@app.get("/database/asteroids/{asteroid_id}")
+def get_asteroid_by_id(asteroid_id: str):
+    """
+    Get a single asteroid by ID in normalized format
+    Args:
+        asteroid_id: The neo_reference_id of the asteroid
+    Returns: Complete asteroid data in normalized format
+    """
+    result = normalize_asteroids(asteroid_id)
     
+    if result is None:
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Asteroid with ID {asteroid_id} not found"
+        )
+    
+    return json.loads(result)
 
-    # Convert to list of dicts for JSON response
-    columns = [desc[0] for desc in cur.description]
-    results = [dict(zip(columns, row)) for row in rows]
 
-    print(json.dumps(results, indent=4))
-    normalize_asteroids(id)
-            
+# ============================================================================
+# NASA API ENDPOINT (Legacy - for direct API fetching)
+# ============================================================================
+
+@app.get("/asteroids/{date}")
+def get_asteroids_from_api(date: str):
+    """
+    Fetch asteroids directly from NASA API for a specific date
+    This endpoint is for testing/comparison with database data
+    """
+    try:
+        response = requests.get(URL)
         
+        if response.status_code == 200:
+            data = response.json()
+            asteroids = data.get("near_earth_objects", {}).get(date, [])
+            
+            if not asteroids:
+                raise HTTPException(
+                    status_code=404, 
+                    detail=f"No asteroids found for date {date}"
+                )
+            
+            return asteroids
+        else:
+            raise HTTPException(
+                status_code=response.status_code, 
+                detail="Error fetching from NASA API"
+            )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-# if __name__ == "__main__":
-#     import uvicorn
-#     uvicorn.run(
-#         "main:app",
-#         host="127.0.0.1",  # keep localhost for safety
-#         port=8000,
-#         reload=False       # True for dev hot-reload
-#     )
-
-
-
-#print(get_asteroids(DATE))             
-
+# ============================================================================
+# AI ANALYSIS ENDPOINTS
+# ============================================================================
 
 @app.get("/ai/generalSummary")
 def ai_generalSummary():
+    """
+    Get AI-generated general summary of all asteroids
+    Uses GPT-4 to analyze asteroid data and provide policy recommendations
+    """
+    # Get all asteroids from database
+    asteroids = get_all_asteroids_normalized()
+    
+    if not asteroids:
+        raise HTTPException(
+            status_code=404, 
+            detail="No asteroids found in database"
+        )
+    
+    # Prepare data for AI (limit to recent/important asteroids if too many)
+    asteroid_summary = json.dumps(asteroids[:50], indent=2)  # Limit to 50 for token limits
+    
     response = client.chat.completions.create(
-  model="gpt-4o",
-  messages = [
-    {"role": "system",
-     "content": "You are a profesional astronomer/phycisist who is explaining to policy makers and must discuss asteroid impact scenarios, predict consequences, and evaluate potential mitigation strategies given data on multiple asteroids in near earth orbit, avoid jargon where applicable"}, 
-    {"role": "user",
-     "content": f"{TEST_DATA}"}
-    ],
-  max_tokens = 1000,  # Maximum output length
-  temperature = 1
-  )
-    print(response.choices[0].message.content)
+        model="gpt-4o",
+        messages=[
+            {
+                "role": "system",
+                "content": "You are a professional astronomer/physicist explaining to policy makers. Discuss asteroid impact scenarios, predict consequences, and evaluate potential mitigation strategies. Avoid jargon where applicable."
+            }, 
+            {
+                "role": "user",
+                "content": f"Analyze these near-Earth asteroids and provide a summary:\n\n{asteroid_summary}"
+            }
+        ],
+        max_tokens=1000,
+        temperature=1
+    )
+    
+    return {
+        "summary": response.choices[0].message.content,
+        "asteroids_analyzed": len(asteroids[:50]),
+        "total_asteroids": len(asteroids)
+    }
 
 
-
-
-@app.post("/ai/individualReport/{id}")
-def ai_individualReport(id):
-    cur.execute("SELECT * FROM users WHERE id = ?", (id,))
-    asteroid = cur.fetchone()
-    print(f"test inin: {asteroid}")
+@app.post("/ai/individualReport/{asteroid_id}")
+def ai_individualReport(asteroid_id: str):
+    """
+    Get AI-generated detailed report for a specific asteroid
+    Args:
+        asteroid_id: The neo_reference_id of the asteroid
+    """
+    # Get asteroid data
+    asteroid_json = normalize_asteroids(asteroid_id)
+    
+    if asteroid_json is None:
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Asteroid with ID {asteroid_id} not found"
+        )
+    
+    asteroid_data = json.loads(asteroid_json)
+    
     response = client.chat.completions.create(
-  model="gpt-4o",
-  messages = [
-    {"role": "system",
-     "content": "You are a profesional astronomer/phycisist who is explaining to policy makers and must discuss asteroid impact scenarios, predict consequences, and evaluate potential mitigation strategies given data on an asteroid in near earth orbit, avoid jargon where applicable"}, 
-    {"role": "user",
-     "content": f"{asteroid} please give info about this asteroid for testing purposes"}
-    ],
-  max_tokens = 1000,  # Maximum output length
-  temperature = 1
-  )
-    print(response.choices[0].message.content)   
+        model="gpt-4o",
+        messages=[
+            {
+                "role": "system",
+                "content": "You are a professional astronomer/physicist explaining to policy makers. Discuss this asteroid's impact scenarios, predict consequences, and evaluate potential mitigation strategies. Avoid jargon where applicable."
+            }, 
+            {
+                "role": "user",
+                "content": f"Provide a detailed analysis of this asteroid:\n\n{json.dumps(asteroid_data, indent=2)}"
+            }
+        ],
+        max_tokens=1000,
+        temperature=1
+    )
+    
+    return {
+        "asteroid_id": asteroid_id,
+        "asteroid_name": asteroid_data.get("name"),
+        "report": response.choices[0].message.content,
+        "asteroid_data": asteroid_data
+    }
 
 
+# ============================================================================
+# HEALTH CHECK
+# ============================================================================
+
+@app.get("/")
+def root():
+    """
+    Root endpoint - API health check
+    """
+    return {
+        "status": "online",
+        "api_name": "NASA NEO Data Normalizer",
+        "endpoints": {
+            "database": [
+                "/database/asteroids",
+                "/database/asteroids/ids",
+                "/database/asteroids/{asteroid_id}"
+            ],
+            "ai_analysis": [
+                "/ai/generalSummary",
+                "/ai/individualReport/{asteroid_id}"
+            ],
+            "nasa_api": [
+                "/asteroids/{date}"
+            ]
+        }
+    }
 
 
-#print(normalize_asteroid(get_json_asteroid(DATE)))
-#get_json_asteroid(DATE)
+# ============================================================================
+# RUN SERVER
+# ============================================================================
 
-
-
-TEST_DATA = """
-{'id': '3427459', 'name': '(2008 SS)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=3427459', 'absolute_magnitude_h': 22.18, 'estimated_diameter_km_min': 0.0973991073, 'estimated_diameter_km_max': 0.217791025, 'estimated_diameter_m_min': 97.3991073414, 'estimated_diameter_m_max': 217.7910249632, 'estimated_diameter_mi_min': 0.0605209807, 'estimated_diameter_mi_max': 0.135329027, 'estimated_diameter_ft_min': 319.5508873299, 'estimated_diameter_ft_max': 714.5375063401, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-03', 'close_approach_date_full': '2025-Oct-03 22:04', 'epoch_date_close_approach': 1759529040000, 'relative_velocity_km_s': 14.5278596145, 'relative_velocity_km_h': 52300.2946120308, 'relative_velocity_mph': 32497.3691715699, 'miss_distance_au': 0.1193906609, 'miss_distance_lunar': 46.4429670901, 'miss_distance_km': 17860588.568532284, 'miss_distance_mi': 11098055.112832185, 'orbiting_body': 'Earth'}
-{'id': '3716631', 'name': '(2015 HN9)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=3716631', 'absolute_magnitude_h': 22.6, 'estimated_diameter_km_min': 0.0802703167, 'estimated_diameter_km_max': 0.1794898848, 'estimated_diameter_m_min': 80.2703167283, 'estimated_diameter_m_max': 179.4898847799, 'estimated_diameter_mi_min': 0.049877647, 'estimated_diameter_mi_max': 0.1115298092, 'estimated_diameter_ft_min': 263.3540659348, 'estimated_diameter_ft_max': 588.8775935812, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-03', 'close_approach_date_full': '2025-Oct-03 22:24', 'epoch_date_close_approach': 1759530240000, 'relative_velocity_km_s': 7.7084299078, 'relative_velocity_km_h': 27750.3476679028, 'relative_velocity_mph': 17242.9868606477, 'miss_distance_au': 0.0822716951, 'miss_distance_lunar': 32.0036893939, 'miss_distance_km': 12307670.348249437, 'miss_distance_mi': 7647631.7290067505, 'orbiting_body': 'Earth'}
-{'id': '3720000', 'name': '(2015 KT120)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=3720000', 'absolute_magnitude_h': 25.1, 'estimated_diameter_km_min': 0.0253837029, 'estimated_diameter_km_max': 0.0567596853, 'estimated_diameter_m_min': 25.3837029364, 'estimated_diameter_m_max': 56.7596852866, 'estimated_diameter_mi_min': 0.0157726969, 'estimated_diameter_mi_max': 0.0352688224, 'estimated_diameter_ft_min': 83.279867942, 'estimated_diameter_ft_max': 186.2194458756, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-03', 'close_approach_date_full': '2025-Oct-03 04:07', 'epoch_date_close_approach': 1759464420000, 'relative_velocity_km_s': 11.569203976, 'relative_velocity_km_h': 41649.1343134956, 'relative_velocity_mph': 25879.1523738495, 'miss_distance_au': 0.266230725, 'miss_distance_lunar': 103.563752025, 'miss_distance_km': 39827549.38855575, 'miss_distance_mi': 24747691.62433935, 'orbiting_body': 'Earth'}
-{'id': '54201807', 'name': '(2021 SY3)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=54201807', 'absolute_magnitude_h': 27.0, 'estimated_diameter_km_min': 0.0105816886, 'estimated_diameter_km_max': 0.023661375, 'estimated_diameter_m_min': 10.5816885933, 'estimated_diameter_m_max': 23.6613750114, 'estimated_diameter_mi_min': 0.0065751544, 'estimated_diameter_mi_max': 0.0147024923, 'estimated_diameter_ft_min': 34.7168272045, 'estimated_diameter_ft_max': 77.6291855923, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-03', 'close_approach_date_full': '2025-Oct-03 23:05', 'epoch_date_close_approach': 1759532700000, 'relative_velocity_km_s': 5.9294008854, 'relative_velocity_km_h': 21345.843187419, 'relative_velocity_mph': 13263.4768405382, 'miss_distance_au': 0.052024416, 'miss_distance_lunar': 20.237497824, 'miss_distance_km': 7782741.82159392, 'miss_distance_mi': 4835971.520959296, 'orbiting_body': 'Earth'}
-{'id': '54212590', 'name': '(2021 UJ1)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=54212590', 'absolute_magnitude_h': 26.33, 'estimated_diameter_km_min': 0.0144063837, 'estimated_diameter_km_max': 0.0322136532, 'estimated_diameter_m_min': 14.4063836669, 'estimated_diameter_m_max': 32.2136531891, 'estimated_diameter_mi_min': 0.008951709, 'estimated_diameter_mi_max': 0.0200166299, 'estimated_diameter_ft_min': 47.2650397896, 'estimated_diameter_ft_max': 105.6878419288, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-03', 'close_approach_date_full': '2025-Oct-03 18:11', 'epoch_date_close_approach': 1759515060000, 'relative_velocity_km_s': 22.1261472346, 'relative_velocity_km_h': 79654.1300445942, 'relative_velocity_mph': 49493.978749098, 'miss_distance_au': 0.4461354144, 'miss_distance_lunar': 173.5466762016, 'miss_distance_km': 66740907.72580733, 'miss_distance_mi': 41470877.030696005, 'orbiting_body': 'Earth'}
-{'id': '54265626', 'name': '(2022 FL1)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=54265626', 'absolute_magnitude_h': 29.24, 'estimated_diameter_km_min': 0.0037718549, 'estimated_diameter_km_max': 0.0084341239, 'estimated_diameter_m_min': 3.7718548926, 'estimated_diameter_m_max': 8.4341239412, 'estimated_diameter_mi_min': 0.0023437212, 'estimated_diameter_mi_max': 0.00524072, 'estimated_diameter_ft_min': 12.374852406, 'estimated_diameter_ft_max': 27.6710111913, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-03', 'close_approach_date_full': '2025-Oct-03 09:08', 'epoch_date_close_approach': 1759482480000, 'relative_velocity_km_s': 7.6817966076, 'relative_velocity_km_h': 27654.4677872768, 'relative_velocity_mph': 17183.4108314888, 'miss_distance_au': 0.4791473811, 'miss_distance_lunar': 186.3883312479, 'miss_distance_km': 71679427.62863825, 'miss_distance_mi': 44539531.002939664, 'orbiting_body': 'Earth'}
-{'id': '54300842', 'name': '(2022 QG41)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=54300842', 'absolute_magnitude_h': 21.96, 'estimated_diameter_km_min': 0.1077841687, 'estimated_diameter_km_max': 0.2410127282, 'estimated_diameter_m_min': 107.7841687222, 'estimated_diameter_m_max': 241.0127281611, 'estimated_diameter_mi_min': 0.0669739567, 'estimated_diameter_mi_max': 0.1497583199, 'estimated_diameter_ft_min': 353.6226121105, 'estimated_diameter_ft_max': 790.7241990601, 'is_potentially_hazardous_asteroid': True, 'is_sentry_object': False, 'close_approach_date': '2025-10-03', 'close_approach_date_full': '2025-Oct-03 16:41', 'epoch_date_close_approach': 1759509660000, 'relative_velocity_km_s': 11.9542122564, 'relative_velocity_km_h': 43035.164122892, 'relative_velocity_mph': 26740.3773962492, 'miss_distance_au': 0.108303592, 'miss_distance_lunar': 42.130097288, 'miss_distance_km': 16201986.67654904, 'miss_distance_mi': 10067447.687055152, 'orbiting_body': 'Earth'}
-{'id': '54309253', 'name': '(2022 SK21)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=54309253', 'absolute_magnitude_h': 25.6, 'estimated_diameter_km_min': 0.0201629919, 'estimated_diameter_km_max': 0.0450858206, 'estimated_diameter_m_min': 20.1629919443, 'estimated_diameter_m_max': 45.0858206172, 'estimated_diameter_mi_min': 0.0125286985, 'estimated_diameter_mi_max': 0.0280150214, 'estimated_diameter_ft_min': 66.1515504905, 'estimated_diameter_ft_max': 147.9193637137, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-03', 'close_approach_date_full': '2025-Oct-03 03:16', 'epoch_date_close_approach': 1759461360000, 'relative_velocity_km_s': 2.376499605, 'relative_velocity_km_h': 8555.3985780294, 'relative_velocity_mph': 5315.9919664428, 'miss_distance_au': 0.1422745376, 'miss_distance_lunar': 55.3447951264, 'miss_distance_km': 21283967.780194912, 'miss_distance_mi': 13225244.315885305, 'orbiting_body': 'Earth'}
-{'id': '54324411', 'name': '(2022 VV)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=54324411', 'absolute_magnitude_h': 23.69, 'estimated_diameter_km_min': 0.0485909037, 'estimated_diameter_km_max': 0.1086525639, 'estimated_diameter_m_min': 48.5909037451, 'estimated_diameter_m_max': 108.6525638621, 'estimated_diameter_mi_min': 0.0301929785, 'estimated_diameter_mi_max': 0.0675135523, 'estimated_diameter_ft_min': 159.418980643, 'estimated_diameter_ft_max': 356.4716776214, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-03', 'close_approach_date_full': '2025-Oct-03 13:30', 'epoch_date_close_approach': 1759498200000, 'relative_velocity_km_s': 9.0730597852, 'relative_velocity_km_h': 32663.0152267157, 'relative_velocity_mph': 20295.5274335112, 'miss_distance_au': 0.2037924967, 'miss_distance_lunar': 79.2752812163, 'miss_distance_km': 30486923.428302027, 'miss_distance_mi': 18943695.78750084, 'orbiting_body': 'Earth'}
-{'id': '54383301', 'name': '(2023 RV12)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=54383301', 'absolute_magnitude_h': 26.2, 'estimated_diameter_km_min': 0.0152951935, 'estimated_diameter_km_max': 0.0342010925, 'estimated_diameter_m_min': 15.2951935344, 'estimated_diameter_m_max': 34.201092472, 'estimated_diameter_mi_min': 0.0095039897, 'estimated_diameter_mi_max': 0.021251567, 'estimated_diameter_ft_min': 50.1810827555, 'estimated_diameter_ft_max': 112.2083122258, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': True, 'close_approach_date': '2025-10-03', 'close_approach_date_full': '2025-Oct-03 12:57', 'epoch_date_close_approach': 1759496220000, 'relative_velocity_km_s': 13.598403206, 'relative_velocity_km_h': 48954.251541506, 'relative_velocity_mph': 30418.268131443, 'miss_distance_au': 0.1914690163, 'miss_distance_lunar': 74.4814473407, 'miss_distance_km': 28643357.00947528, 'miss_distance_mi': 17798156.734193638, 'orbiting_body': 'Earth'}
-{'id': '54385247', 'name': '(2023 SV1)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=54385247', 'absolute_magnitude_h': 24.13, 'estimated_diameter_km_min': 0.0396784754, 'estimated_diameter_km_max': 0.0887237683, 'estimated_diameter_m_min': 39.6784754066, 'estimated_diameter_m_max': 88.7237682527, 'estimated_diameter_mi_min': 0.0246550539, 'estimated_diameter_mi_max': 0.0551303766, 'estimated_diameter_ft_min': 130.178729253, 'estimated_diameter_ft_max': 291.0884878343, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-03', 'close_approach_date_full': '2025-Oct-03 06:51', 'epoch_date_close_approach': 1759474260000, 'relative_velocity_km_s': 31.8007142527, 'relative_velocity_km_h': 114482.5713097996, 'relative_velocity_mph': 71135.0177119141, 'miss_distance_au': 0.400757824, 'miss_distance_lunar': 155.894793536, 'miss_distance_km': 59952516.85623488, 'miss_distance_mi': 37252766.54072615, 'orbiting_body': 'Earth'}
-{'id': '54417174', 'name': '(2023 XJ16)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=54417174', 'absolute_magnitude_h': 19.92, 'estimated_diameter_km_min': 0.2757750529, 'estimated_diameter_km_max': 0.6166517648, 'estimated_diameter_m_min': 275.7750529244, 'estimated_diameter_m_max': 616.6517648376, 'estimated_diameter_mi_min': 0.1713586204, 'estimated_diameter_mi_max': 0.3831695238, 'estimated_diameter_ft_min': 904.7738246366, 'estimated_diameter_ft_max': 2023.1357761499, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-03', 'close_approach_date_full': '2025-Oct-03 13:04', 'epoch_date_close_approach': 1759496640000, 'relative_velocity_km_s': 26.1780296583, 'relative_velocity_km_h': 94240.9067697022, 'relative_velocity_mph': 58557.6345425408, 'miss_distance_au': 0.4809188588, 'miss_distance_lunar': 187.0774360732, 'miss_distance_km': 71944436.91931075, 'miss_distance_mi': 44704200.140354194, 'orbiting_body': 'Earth'}
-{'id': '54486931', 'name': '(2024 TW)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=54486931', 'absolute_magnitude_h': 28.95, 'estimated_diameter_km_min': 0.0043107712, 'estimated_diameter_km_max': 0.0096391775, 'estimated_diameter_m_min': 4.3107712388, 'estimated_diameter_m_max': 9.6391775254, 'estimated_diameter_mi_min': 0.0026785882, 'estimated_diameter_mi_max': 0.0059895054, 'estimated_diameter_ft_min': 14.142950711, 'estimated_diameter_ft_max': 31.6245991923, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-03', 'close_approach_date_full': '2025-Oct-03 03:41', 'epoch_date_close_approach': 1759462860000, 'relative_velocity_km_s': 11.8351736661, 'relative_velocity_km_h': 42606.6251980061, 'relative_velocity_mph': 26474.0999737277, 'miss_distance_au': 0.0533680553, 'miss_distance_lunar': 20.7601735117, 'miss_distance_km': 7983747.398922211, 'miss_distance_mi': 4960870.595064072, 'orbiting_body': 'Earth'}
-{'id': '54542743', 'name': '(2025 QK10)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=54542743', 'absolute_magnitude_h': 24.12, 'estimated_diameter_km_min': 0.0398616229, 'estimated_diameter_km_max': 0.0891332986, 'estimated_diameter_m_min': 39.8616229277, 'estimated_diameter_m_max': 89.1332985597, 'estimated_diameter_mi_min': 0.0247688565, 'estimated_diameter_mi_max': 0.0553848469, 'estimated_diameter_ft_min': 130.779606966, 'estimated_diameter_ft_max': 292.4320912466, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-03', 'close_approach_date_full': '2025-Oct-03 16:11', 'epoch_date_close_approach': 1759507860000, 'relative_velocity_km_s': 11.8906355112, 'relative_velocity_km_h': 42806.2878403661, 'relative_velocity_mph': 26598.1625750319, 'miss_distance_au': 0.084040531, 'miss_distance_lunar': 32.691766559, 'miss_distance_km': 12572284.43126897, 'miss_distance_mi': 7812055.295772986, 'orbiting_body': 'Earth'}
-{'id': '54544998', 'name': '(2025 RH2)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=54544998', 'absolute_magnitude_h': 24.9, 'estimated_diameter_km_min': 0.0278326768, 'estimated_diameter_km_max': 0.0622357573, 'estimated_diameter_m_min': 27.8326768072, 'estimated_diameter_m_max': 62.2357573367, 'estimated_diameter_mi_min': 0.0172944182, 'estimated_diameter_mi_max': 0.0386714948, 'estimated_diameter_ft_min': 91.3145593761, 'estimated_diameter_ft_max': 204.1855621004, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-03', 'close_approach_date_full': '2025-Oct-03 20:07', 'epoch_date_close_approach': 1759522020000, 'relative_velocity_km_s': 5.0764958157, 'relative_velocity_km_h': 18275.3849365381, 'relative_velocity_mph': 11355.6134901506, 'miss_distance_au': 0.050233551, 'miss_distance_lunar': 19.540851339, 'miss_distance_km': 7514832.23213637, 'miss_distance_mi': 4669500.221447106, 'orbiting_body': 'Earth'}
-{'id': '54546468', 'name': '(2025 SV2)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=54546468', 'absolute_magnitude_h': 24.754, 'estimated_diameter_km_min': 0.0297683646, 'estimated_diameter_km_max': 0.0665640869, 'estimated_diameter_m_min': 29.768364625, 'estimated_diameter_m_max': 66.5640868805, 'estimated_diameter_mi_min': 0.0184971985, 'estimated_diameter_mi_max': 0.0413609932, 'estimated_diameter_ft_min': 97.6652413963, 'estimated_diameter_ft_max': 218.3861188009, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-03', 'close_approach_date_full': '2025-Oct-03 03:53', 'epoch_date_close_approach': 1759463580000, 'relative_velocity_km_s': 7.2831111038, 'relative_velocity_km_h': 26219.1999735244, 'relative_velocity_mph': 16291.5912279935, 'miss_distance_au': 0.1178883287, 'miss_distance_lunar': 45.8585598643, 'miss_distance_km': 17635842.871379867, 'miss_distance_mi': 10958404.612301432, 'orbiting_body': 'Earth'}
-{'id': '54547367', 'name': '(2025 SV6)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=54547367', 'absolute_magnitude_h': 27.19, 'estimated_diameter_km_min': 0.0096951599, 'estimated_diameter_km_max': 0.0216790366, 'estimated_diameter_m_min': 9.6951599093, 'estimated_diameter_m_max': 21.6790366099, 'estimated_diameter_mi_min': 0.0060242912, 'estimated_diameter_mi_max': 0.0134707247, 'estimated_diameter_ft_min': 31.8082684368, 'estimated_diameter_ft_max': 71.1254504712, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': True, 'close_approach_date': '2025-10-03', 'close_approach_date_full': '2025-Oct-03 20:02', 'epoch_date_close_approach': 1759521720000, 'relative_velocity_km_s': 4.9706195643, 'relative_velocity_km_h': 17894.2304314285, 'relative_velocity_mph': 11118.7789033507, 'miss_distance_au': 0.0119803156, 'miss_distance_lunar': 4.6603427684, 'miss_distance_km': 1792229.695687772, 'miss_distance_mi': 1113639.8927323737, 'orbiting_body': 'Earth'}
-{'id': '54549686', 'name': '(2025 SE29)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=54549686', 'absolute_magnitude_h': 22.686, 'estimated_diameter_km_min': 0.0771533835, 'estimated_diameter_km_max': 0.1725202103, 'estimated_diameter_m_min': 77.1533835271, 'estimated_diameter_m_max': 172.5202102606, 'estimated_diameter_mi_min': 0.0479408751, 'estimated_diameter_mi_max': 0.1071990556, 'estimated_diameter_ft_min': 253.1279068109, 'estimated_diameter_ft_max': 566.0112066315, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-03', 'close_approach_date_full': '2025-Oct-03 21:03', 'epoch_date_close_approach': 1759525380000, 'relative_velocity_km_s': 8.6380022778, 'relative_velocity_km_h': 31096.8081999852, 'relative_velocity_mph': 19322.3472951519, 'miss_distance_au': 0.0317566498, 'miss_distance_lunar': 12.3533367722, 'miss_distance_km': 4750727.168415926, 'miss_distance_mi': 2951964.978018739, 'orbiting_body': 'Earth'}
-{'id': '54549682', 'name': '(2025 TC)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=54549682', 'absolute_magnitude_h': 27.013, 'estimated_diameter_km_min': 0.0105185282, 'estimated_diameter_km_max': 0.0235201441, 'estimated_diameter_m_min': 10.5185282238, 'estimated_diameter_m_max': 23.5201441318, 'estimated_diameter_mi_min': 0.0065359084, 'estimated_diameter_mi_max': 0.0146147355, 'estimated_diameter_ft_min': 34.5096081379, 'estimated_diameter_ft_max': 77.1658296732, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-03', 'close_approach_date_full': '2025-Oct-03 06:34', 'epoch_date_close_approach': 1759473240000, 'relative_velocity_km_s': 16.1507639147, 'relative_velocity_km_h': 58142.7500929686, 'relative_velocity_mph': 36127.6438008226, 'miss_distance_au': 0.000572952, 'miss_distance_lunar': 0.222878328, 'miss_distance_km': 85712.39881224, 'miss_distance_mi': 53259.214959312, 'orbiting_body': 'Earth'}
-{'id': '54550514', 'name': '(2025 TS)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=54550514', 'absolute_magnitude_h': 27.353, 'estimated_diameter_km_min': 0.0089940434, 'estimated_diameter_km_max': 0.0201112923, 'estimated_diameter_m_min': 8.9940433527, 'estimated_diameter_m_max': 20.1112923293, 'estimated_diameter_mi_min': 0.0055886377, 'estimated_diameter_mi_max': 0.0124965738, 'estimated_diameter_ft_min': 29.5080171934, 'estimated_diameter_ft_max': 65.9819323257, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-03', 'close_approach_date_full': '2025-Oct-03 07:50', 'epoch_date_close_approach': 1759477800000, 'relative_velocity_km_s': 9.1488496108, 'relative_velocity_km_h': 32935.8585990453, 'relative_velocity_mph': 20465.0616945012, 'miss_distance_au': 0.0043303736, 'miss_distance_lunar': 1.6845153304, 'miss_distance_km': 647814.666864232, 'miss_distance_mi': 402533.3682691216, 'orbiting_body': 'Earth'}
-{'id': '2247517', 'name': '247517 (2002 QY6)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=2247517', 'absolute_magnitude_h': 19.64, 'estimated_diameter_km_min': 0.313729225, 'estimated_diameter_km_max': 0.7015198735, 'estimated_diameter_m_min': 313.7292249562, 'estimated_diameter_m_max': 701.5198735305, 'estimated_diameter_mi_min': 0.1949422422, 'estimated_diameter_mi_max': 0.4359041053, 'estimated_diameter_ft_min': 1029.2953904054, 'estimated_diameter_ft_max': 2301.5744618737, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-05', 'close_approach_date_full': '2025-Oct-05 00:22', 'epoch_date_close_approach': 1759623720000, 'relative_velocity_km_s': 18.2933115903, 'relative_velocity_km_h': 65855.9217250994, 'relative_velocity_mph': 40920.3086963541, 'miss_distance_au': 0.1371381545, 'miss_distance_lunar': 53.3467421005, 'miss_distance_km': 20515575.808930915, 'miss_distance_mi': 12747787.684900027, 'orbiting_body': 'Earth'}
-{'id': '2319988', 'name': '319988 (2007 DK)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=2319988', 'absolute_magnitude_h': 19.45, 'estimated_diameter_km_min': 0.3424167308, 'estimated_diameter_km_max': 0.7656670868, 'estimated_diameter_m_min': 342.41673084, 'estimated_diameter_m_max': 765.6670867916, 'estimated_diameter_mi_min': 0.2127678265, 'estimated_diameter_mi_max': 0.4757633234, 'estimated_diameter_ft_min': 1123.4145072092, 'estimated_diameter_ft_max': 2512.0312050292, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-05', 'close_approach_date_full': '2025-Oct-05 10:50', 'epoch_date_close_approach': 1759661400000, 'relative_velocity_km_s': 14.2822478089, 'relative_velocity_km_h': 51416.0921121149, 'relative_velocity_mph': 31947.9601237749, 'miss_distance_au': 0.1313567408, 'miss_distance_lunar': 51.0977721712, 'miss_distance_km': 19650688.633822095, 'miss_distance_mi': 12210371.714597085, 'orbiting_body': 'Earth'}
-{'id': '3092506', 'name': '(2001 WJ4)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=3092506', 'absolute_magnitude_h': 27.4, 'estimated_diameter_km_min': 0.0088014652, 'estimated_diameter_km_max': 0.0196806745, 'estimated_diameter_m_min': 8.801465209, 'estimated_diameter_m_max': 19.6806745089, 'estimated_diameter_mi_min': 0.0054689752, 'estimated_diameter_mi_max': 0.0122290004, 'estimated_diameter_ft_min': 28.8761991163, 'estimated_diameter_ft_max': 64.5691441559, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-05', 'close_approach_date_full': '2025-Oct-05 05:34', 'epoch_date_close_approach': 1759642440000, 'relative_velocity_km_s': 18.2830043948, 'relative_velocity_km_h': 65818.8158211446, 'relative_velocity_mph': 40897.252530644, 'miss_distance_au': 0.4952273598, 'miss_distance_lunar': 192.6434429622, 'miss_distance_km': 74084958.19180362, 'miss_distance_mi': 46034258.383461, 'orbiting_body': 'Earth'}
-{'id': '3746623', 'name': '(2016 EF156)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=3746623', 'absolute_magnitude_h': 24.7, 'estimated_diameter_km_min': 0.0305179233, 'estimated_diameter_km_max': 0.0682401509, 'estimated_diameter_m_min': 30.5179232594, 'estimated_diameter_m_max': 68.2401509401, 'estimated_diameter_mi_min': 0.0189629525, 'estimated_diameter_mi_max': 0.0424024508, 'estimated_diameter_ft_min': 100.1244233463, 'estimated_diameter_ft_max': 223.8850168104, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-05', 'close_approach_date_full': '2025-Oct-05 15:01', 'epoch_date_close_approach': 1759676460000, 'relative_velocity_km_s': 17.7913534994, 'relative_velocity_km_h': 64048.8725979026, 'relative_velocity_mph': 39797.4786428468, 'miss_distance_au': 0.3435123293, 'miss_distance_lunar': 133.6262960977, 'miss_distance_km': 51388712.782018594, 'miss_distance_mi': 31931465.441018917, 'orbiting_body': 'Earth'}
-{'id': '3830865', 'name': '(2018 SP1)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=3830865', 'absolute_magnitude_h': 23.1, 'estimated_diameter_km_min': 0.063760979, 'estimated_diameter_km_max': 0.1425738833, 'estimated_diameter_m_min': 63.7609789875, 'estimated_diameter_m_max': 142.5738833281, 'estimated_diameter_mi_min': 0.0396192233, 'estimated_diameter_mi_max': 0.0885912765, 'estimated_diameter_ft_min': 209.1895703015, 'estimated_diameter_ft_max': 467.7620993781, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-05', 'close_approach_date_full': '2025-Oct-05 17:14', 'epoch_date_close_approach': 1759684440000, 'relative_velocity_km_s': 16.381588731, 'relative_velocity_km_h': 58973.7194317699, 'relative_velocity_mph': 36643.9758324795, 'miss_distance_au': 0.0337028746, 'miss_distance_lunar': 13.1104182194, 'miss_distance_km': 5041878.253037102, 'miss_distance_mi': 3132877.8729599277, 'orbiting_body': 'Earth'}
-{'id': '54051291', 'name': '(2020 QW2)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=54051291', 'absolute_magnitude_h': 20.6, 'estimated_diameter_km_min': 0.2016299194, 'estimated_diameter_km_max': 0.4508582062, 'estimated_diameter_m_min': 201.6299194428, 'estimated_diameter_m_max': 450.8582061718, 'estimated_diameter_mi_min': 0.1252869847, 'estimated_diameter_mi_max': 0.2801502144, 'estimated_diameter_ft_min': 661.5155049046, 'estimated_diameter_ft_max': 1479.1936371367, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-05', 'close_approach_date_full': '2025-Oct-05 04:32', 'epoch_date_close_approach': 1759638720000, 'relative_velocity_km_s': 21.5787552506, 'relative_velocity_km_h': 77683.5189020538, 'relative_velocity_mph': 48269.5176200012, 'miss_distance_au': 0.2866027457, 'miss_distance_lunar': 111.4884680773, 'miss_distance_km': 42875160.29287166, 'miss_distance_mi': 26641389.228356533, 'orbiting_body': 'Earth'}
-{'id': '54296533', 'name': '(2022 QE1)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=54296533', 'absolute_magnitude_h': 28.33, 'estimated_diameter_km_min': 0.0057352846, 'estimated_diameter_km_max': 0.0128244863, 'estimated_diameter_m_min': 5.7352846395, 'estimated_diameter_m_max': 12.8244863243, 'estimated_diameter_mi_min': 0.0035637396, 'estimated_diameter_mi_max': 0.0079687639, 'estimated_diameter_ft_min': 18.8165512567, 'estimated_diameter_ft_max': 42.0750877122, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-05', 'close_approach_date_full': '2025-Oct-05 04:11', 'epoch_date_close_approach': 1759637460000, 'relative_velocity_km_s': 9.2772720654, 'relative_velocity_km_h': 33398.1794355721, 'relative_velocity_mph': 20752.3298831753, 'miss_distance_au': 0.1671595129, 'miss_distance_lunar': 65.0250505181, 'miss_distance_km': 25006707.08007752, 'miss_distance_mi': 15538447.252186898, 'orbiting_body': 'Earth'}
-{'id': '54547735', 'name': '(2025 SY10)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=54547735', 'absolute_magnitude_h': 26.151, 'estimated_diameter_km_min': 0.0156442583, 'estimated_diameter_km_max': 0.0349816249, 'estimated_diameter_m_min': 15.644258253, 'estimated_diameter_m_max': 34.9816249114, 'estimated_diameter_mi_min': 0.0097208884, 'estimated_diameter_mi_max': 0.0217365673, 'estimated_diameter_ft_min': 51.3263082469, 'estimated_diameter_ft_max': 114.7691142742, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-05', 'close_approach_date_full': '2025-Oct-05 00:59', 'epoch_date_close_approach': 1759625940000, 'relative_velocity_km_s': 11.4006049777, 'relative_velocity_km_h': 41042.1779198957, 'relative_velocity_mph': 25502.0132747263, 'miss_distance_au': 0.0401538652, 'miss_distance_lunar': 15.6198535628, 'miss_distance_km': 6006932.706187124, 'miss_distance_mi': 3732534.9036813513, 'orbiting_body': 'Earth'}
-{'id': '54549110', 'name': '(2025 SN21)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=54549110', 'absolute_magnitude_h': 26.646, 'estimated_diameter_km_min': 0.0124553225, 'estimated_diameter_km_max': 0.0278509478, 'estimated_diameter_m_min': 12.4553224885, 'estimated_diameter_m_max': 27.850947766, 'estimated_diameter_mi_min': 0.0077393762, 'estimated_diameter_mi_max': 0.0173057713, 'estimated_diameter_ft_min': 40.8639202332, 'estimated_diameter_ft_max': 91.3745034685, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-05', 'close_approach_date_full': '2025-Oct-05 16:32', 'epoch_date_close_approach': 1759681920000, 'relative_velocity_km_s': 8.3257528748, 'relative_velocity_km_h': 29972.7103491071, 'relative_velocity_mph': 18623.8766055327, 'miss_distance_au': 0.0190223333, 'miss_distance_lunar': 7.3996876537, 'miss_distance_km': 2845700.544110071, 'miss_distance_mi': 1768236.32390214, 'orbiting_body': 'Earth'}
-{'id': '54549113', 'name': '(2025 SJ22)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=54549113', 'absolute_magnitude_h': 25.468, 'estimated_diameter_km_min': 0.0214266846, 'estimated_diameter_km_max': 0.0479115233, 'estimated_diameter_m_min': 21.4266845875, 'estimated_diameter_m_max': 47.9115232701, 'estimated_diameter_mi_min': 0.0133139204, 'estimated_diameter_mi_max': 0.0297708311, 'estimated_diameter_ft_min': 70.2975238621, 'estimated_diameter_ft_max': 157.1900420055, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-05', 'close_approach_date_full': '2025-Oct-05 23:53', 'epoch_date_close_approach': 1759708380000, 'relative_velocity_km_s': 8.4272778166, 'relative_velocity_km_h': 30338.2001395902, 'relative_velocity_mph': 18850.977747847, 'miss_distance_au': 0.0285933067, 'miss_distance_lunar': 11.1227963063, 'miss_distance_km': 4277497.778576729, 'miss_distance_mi': 2657913.8705037003, 'orbiting_body': 'Earth'}
-{'id': '54549130', 'name': '(2025 SO27)', 'nasa_jpl_url': 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=54549130', 'absolute_magnitude_h': 27.41, 'estimated_diameter_km_min': 0.0087610261, 'estimated_diameter_km_max': 0.01959025, 'estimated_diameter_m_min': 8.7610261497, 'estimated_diameter_m_max': 19.5902500233, 'estimated_diameter_mi_min': 0.0054438476, 'estimated_diameter_mi_max': 0.0121728132, 'estimated_diameter_ft_min': 28.7435250329, 'estimated_diameter_ft_max': 64.2724758865, 'is_potentially_hazardous_asteroid': False, 'is_sentry_object': False, 'close_approach_date': '2025-10-05', 'close_approach_date_full': '2025-Oct-05 14:38', 'epoch_date_close_approach': 1759675080000, 'relative_velocity_km_s': 6.4809213857, 'relative_velocity_km_h': 23331.3169883594, 'relative_velocity_mph': 14497.1730475725, 'miss_distance_au': 0.026392685, 'miss_distance_lunar': 10.266754465, 'miss_distance_km': 3948289.45958095, 'miss_distance_mi': 2453353.30667911, 'orbiting_body': 'Earth'}
- """
-
-get_asteroids_from_db()
-#ai_generalSummary()
+if __name__ == "__main__":
+    uvicorn.run(
+        "main:app",
+        host="127.0.0.1",
+        port=8000,
+        reload=True  # Enable hot reload for development
+    )

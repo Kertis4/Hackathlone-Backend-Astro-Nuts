@@ -1,161 +1,122 @@
 import json
 import sqlite3
-conn = sqlite3.connect("asteroids.db")
-from collections import defaultdict
-cur = conn.cursor()
 
-def extract_asteroids_from_feed(feed_response):
+def normalize_asteroids(asteroid_id):
     """
-    Extract and flatten all asteroid data from the /feed endpoint response.
-    Returns a list of asteroid dicts.
+    Takes an asteroid ID and queries the database to return 
+    a single asteroid dict in the specified format
     """
-    all_asteroids = []
-    near_earth_objects = feed_response.get("near_earth_objects", {})
+    conn = sqlite3.connect("asteroids.db")
+    cur = conn.cursor()
     
-    for date in near_earth_objects:
-        all_asteroids.extend(near_earth_objects[date])
+    # Query main asteroid data with close approach
+    query = """
+    SELECT
+        A.neo_reference_id AS id,
+        A.name,
+        A.nasa_jpl_url,
+        A.absolute_magnitude_h,
+        A.is_potentially_hazardous,
+        A.is_sentry_object,
+        C.close_approach_date,
+        C.close_approach_date_full,
+        C.epoch_date_close_approach,
+        C.velocity_km_s,
+        C.velocity_km_h,
+        C.velocity_mi_h,
+        C.miss_distance_astronomical,
+        C.miss_distance_lunar,
+        C.miss_distance_km,
+        C.miss_distance_miles,
+        C.orbiting_body
+    FROM asteroids A
+    LEFT JOIN close_approaches C ON A.neo_reference_id = C.asteroid_id
+    WHERE A.neo_reference_id = ?
+    """
+    
+    cur.execute(query, (asteroid_id,))
+    row = cur.fetchone()
+    
+    if not row:
+        conn.close()
+        return None
+    
+    # Convert to dict
+    columns = [desc[0] for desc in cur.description]
+    asteroid_data = dict(zip(columns, row))
+    
+    # Query diameter data for this asteroid
+    diameter_query = """
+    SELECT unit, diameter_min, diameter_max
+    FROM asteroid_diameters
+    WHERE asteroid_id = ?
+    """
+    cur.execute(diameter_query, (asteroid_id,))
+    diameter_rows = cur.fetchall()
+    
+    # Organize diameter data by unit
+    diameters = {}
+    for unit, d_min, d_max in diameter_rows:
+        diameters[unit] = {'min': d_min, 'max': d_max}
+    
+    conn.close()
+    
+    # Build the normalized output
+    normalized = {
+        'id': asteroid_data['id'],
+        'name': asteroid_data['name'],
+        'nasa_jpl_url': asteroid_data['nasa_jpl_url'],
+        'absolute_magnitude_h': asteroid_data['absolute_magnitude_h'],
+        'estimated_diameter_km_min': diameters.get('kilometers', {}).get('min', 0),
+        'estimated_diameter_km_max': diameters.get('kilometers', {}).get('max', 0),
+        'estimated_diameter_m_min': diameters.get('meters', {}).get('min', 0),
+        'estimated_diameter_m_max': diameters.get('meters', {}).get('max', 0),
+        'estimated_diameter_mi_min': diameters.get('miles', {}).get('min', 0),
+        'estimated_diameter_mi_max': diameters.get('miles', {}).get('max', 0),
+        'estimated_diameter_ft_min': diameters.get('feet', {}).get('min', 0),
+        'estimated_diameter_ft_max': diameters.get('feet', {}).get('max', 0),
+        'is_potentially_hazardous_asteroid': bool(asteroid_data['is_potentially_hazardous']),
+        'is_sentry_object': bool(asteroid_data['is_sentry_object']),
+        'close_approach_date': asteroid_data['close_approach_date'],
+        'close_approach_date_full': asteroid_data['close_approach_date_full'],
+        'epoch_date_close_approach': asteroid_data['epoch_date_close_approach'],
+        'relative_velocity_km_s': asteroid_data['velocity_km_s'],
+        'relative_velocity_km_h': asteroid_data['velocity_km_h'],
+        'relative_velocity_mph': asteroid_data['velocity_mi_h'],
+        'miss_distance_au': asteroid_data['miss_distance_astronomical'],
+        'miss_distance_lunar': asteroid_data['miss_distance_lunar'],
+        'miss_distance_km': asteroid_data['miss_distance_km'],
+        'miss_distance_mi': asteroid_data['miss_distance_miles'],
+        'orbiting_body': asteroid_data['orbiting_body']
+    }
+    
+    return json.dumps(normalized, indent=2)
+
+
+def get_all_asteroid_ids():
+    """
+    Returns a list of all asteroid IDs in the database
+    """
+    conn = sqlite3.connect("asteroids.db")
+    cur = conn.cursor()
+    
+    cur.execute("SELECT neo_reference_id FROM asteroids")
+    ids = [row[0] for row in cur.fetchall()]
+    
+    conn.close()
+    return ids
+
+
+def get_all_asteroids_normalized():
+    """
+    Returns all asteroids in normalized format
+    """
+    ids = get_all_asteroid_ids()
+    all_asteroids = []
+    
+    for asteroid_id in ids:
+        normalized_json = normalize_asteroids(asteroid_id)
+        if normalized_json:
+            all_asteroids.append(json.loads(normalized_json))
     
     return all_asteroids
-
-##this is the old normalize dictionary output
-#def normalize_asteroid(raw_data):
-    approach = raw_data["close_approach_data"][0]
-    velocity = approach["relative_velocity"]
-    distance = approach["miss_distance"]
-    diameter = raw_data["estimated_diameter"]
-    normalized = {
-        "id": raw_data.get("id"),
-        "name": raw_data.get("name"),
-        "nasa_jpl_url": raw_data.get("nasa_jpl_url"),
-        "absolute_magnitude_h": raw_data.get("absolute_magnitude_h"),
-
-        # Estimated diameters in various units
-        "estimated_diameter_km_min": diameter["kilometers"]["estimated_diameter_min"],
-        "estimated_diameter_km_max": diameter["kilometers"]["estimated_diameter_max"],
-        "estimated_diameter_m_min": diameter["meters"]["estimated_diameter_min"],
-        "estimated_diameter_m_max": diameter["meters"]["estimated_diameter_max"],
-        "estimated_diameter_mi_min": diameter["miles"]["estimated_diameter_min"],
-        "estimated_diameter_mi_max": diameter["miles"]["estimated_diameter_max"],
-        "estimated_diameter_ft_min": diameter["feet"]["estimated_diameter_min"],
-        "estimated_diameter_ft_max": diameter["feet"]["estimated_diameter_max"],
-
-        "is_potentially_hazardous_asteroid": raw_data.get("is_potentially_hazardous_asteroid"),
-        "is_sentry_object": raw_data.get("is_sentry_object"),
-        "close_approach_date": approach.get("close_approach_date"),
-            "close_approach_date_full": approach.get("close_approach_date_full"),
-            "epoch_date_close_approach": approach.get("epoch_date_close_approach"),
-            "relative_velocity_km_s": float(velocity["kilometers_per_second"]),
-            "relative_velocity_km_h": float(velocity["kilometers_per_hour"]),
-            "relative_velocity_mph": float(velocity["miles_per_hour"]),
-            "miss_distance_au": float(distance["astronomical"]),
-            "miss_distance_lunar": float(distance["lunar"]),
-            "miss_distance_km": float(distance["kilometers"]),
-            "miss_distance_mi": float(distance["miles"]),
-            "orbiting_body": approach.get("orbiting_body")
-    }
-
-
-    #IDEK LIKE JUST IGNORE THIS 
-    # Normalize first close approach data if available
-    # if raw_data.get("close_approach_data"):
-        
-
-    #     normalized.update({
-    #         "close_approach_date": approach.get("close_approach_date"),
-    #         "close_approach_date_full": approach.get("close_approach_date_full"),
-    #         "epoch_date_close_approach": approach.get("epoch_date_close_approach"),
-    #         "relative_velocity_km_s": float(velocity["kilometers_per_second"]),
-    #         "relative_velocity_km_h": float(velocity["kilometers_per_hour"]),
-    #         "relative_velocity_mph": float(velocity["miles_per_hour"]),
-    #         "miss_distance_au": float(distance["astronomical"]),
-    #         "miss_distance_lunar": float(distance["lunar"]),
-    #         "miss_distance_km": float(distance["kilometers"]),
-    #         "miss_distance_mi": float(distance["miles"]),
-    #         "orbiting_body": approach.get("orbiting_body")
-            
-    #     })
-
-    ##json i guess 
-    normalized = json.dumps(normalized)
-    return normalized
-
-#this is the new normalize:)) json output from sql yay yippeee AAAAAAAAA
-def normalize_asteroids():  
-    grouped = defaultdict(list)
-for row in results:
-    grouped[row["id"]].append(row)
-
-# Build final JSON structure
-final = []
-for asteroid_id, rows in grouped.items():
-    base = rows[0].copy()
-    base["close_approaches"] = [
-        {
-            "date": r["close_approach_date"],
-            "miss_distance_km": r["miss_distance_km"],
-            "velocity_km_s": r["relative_velocity_km_s"],
-        }
-        for r in rows
-    ]
-
-    # Remove duplicate fields from the base
-    for key in ["close_approach_date", "miss_distance_km", "relative_velocity_km_s"]:
-        base.pop(key, None)
-
-    final.append(base)
-
-print(json.dumps(final, indent=4))
-
-    
-sample_asteroid_data = {
-    "links": {
-        "self": "http://api.nasa.gov/neo/rest/v1/neo/2465633?api_key=DEMO_KEY"
-    },
-    "id": "2465633",
-    "neo_reference_id": "2465633",
-    "name": "465633 (2009 JR5)",
-    "nasa_jpl_url": "https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=2465633",
-    "absolute_magnitude_h": 20.44,
-    "estimated_diameter": {
-        "kilometers": {
-            "estimated_diameter_min": 0.2170475943,
-            "estimated_diameter_max": 0.4853331752
-        },
-        "meters": {
-            "estimated_diameter_min": 217.0475943071,
-            "estimated_diameter_max": 485.3331752235
-        },
-        "miles": {
-            "estimated_diameter_min": 0.1348670807,
-            "estimated_diameter_max": 0.3015719604
-        },
-        "feet": {
-            "estimated_diameter_min": 712.0984293066,
-            "estimated_diameter_max": 1592.3004946003
-        }
-    },
-    "is_potentially_hazardous_asteroid": True,
-    "close_approach_data": [
-        {
-            "close_approach_date": "2015-09-08",
-            "close_approach_date_full": "2015-Sep-08 20:28",
-            "epoch_date_close_approach": 1441744080000,
-            "relative_velocity": {
-                "kilometers_per_second": "18.1279360862",
-                "kilometers_per_hour": "65260.5699103704",
-                "miles_per_hour": "40550.3802312521"
-            },
-            "miss_distance": {
-                "astronomical": "0.3027469457",
-                "lunar": "117.7685618773",
-                "kilometers": "45290298.225725659",
-                "miles": "28142086.3515817342"
-            },
-            "orbiting_body": "Earth"
-        }
-    ],
-    "is_sentry_object": False
-}
-
-
-#print(json.dumps(normalized_batch, indent=2))
