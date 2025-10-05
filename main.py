@@ -5,12 +5,22 @@ from dotenv import load_dotenv
 import json 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import uvicorn
 from normalize import normalize_asteroids, get_all_asteroid_ids, get_all_asteroids_normalized
 import datetime
 import sqlite3
 import requests
+
+# Visualization imports
+import base64
+from io import BytesIO
+from matplotlib.figure import Figure
+import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
 
 # Load environment variables
 load_dotenv()
@@ -27,8 +37,8 @@ app = FastAPI(title="NASA NEO Data Normalizer")
 # CONFIGURE CORS
 # ============================================================================
 origins = [
-    "http://localhost:5173",      # Vite default
-    "http://localhost:3000",      # Create React App default
+    "http://localhost:5173",
+    "http://localhost:3000",
     "http://127.0.0.1:5173",
     "http://127.0.0.1:3000",
 ]
@@ -57,6 +67,189 @@ cur = conn.cursor()
 class ReportRequest(BaseModel):
     asteroidIds: List[str]
 
+
+# ============================================================================
+# VISUALIZATION HELPER FUNCTIONS
+# ============================================================================
+
+def create_matplotlib_chart_base64(asteroids_data: List[Dict]) -> str:
+    """
+    Create a matplotlib chart showing asteroid size distribution by ranges
+    Groups asteroids into size categories to avoid clutter
+    """
+    # Extract diameters
+    diameters = []
+    hazardous_status = []
+    
+    for a in asteroids_data:
+        diameter = None
+        if 'estimated_diameter' in a:
+            if 'kilometers' in a['estimated_diameter']:
+                diameter = a['estimated_diameter']['kilometers'].get('estimated_diameter_max', 0)
+        if diameter is None:
+            diameter = a.get('estimated_diameter_km_max', 0)
+        diameters.append(diameter)
+        hazardous_status.append(a.get('is_potentially_hazardous_asteroid', False))
+    
+    # Define size ranges (in km)
+    ranges = [
+        (0, 0.05, 'Tiny\n(0-0.05 km)'),
+        (0.05, 0.1, 'Small\n(0.05-0.1 km)'),
+        (0.1, 0.3, 'Medium\n(0.1-0.3 km)'),
+        (0.3, 0.5, 'Large\n(0.3-0.5 km)'),
+        (0.5, 1.0, 'Very Large\n(0.5-1.0 km)'),
+        (1.0, float('inf'), 'Enormous\n(>1.0 km)')
+    ]
+    
+    # Count asteroids in each range
+    range_counts_hazardous = []
+    range_counts_safe = []
+    range_labels = []
+    
+    for min_size, max_size, label in ranges:
+        hazardous_count = sum(1 for d, h in zip(diameters, hazardous_status) 
+                             if min_size <= d < max_size and h)
+        safe_count = sum(1 for d, h in zip(diameters, hazardous_status) 
+                        if min_size <= d < max_size and not h)
+        
+        # Only include ranges with asteroids
+        if hazardous_count > 0 or safe_count > 0:
+            range_counts_hazardous.append(hazardous_count)
+            range_counts_safe.append(safe_count)
+            range_labels.append(label)
+    
+    # Create stacked horizontal bar chart
+    fig = Figure(figsize=(10, 6))
+    ax = fig.subplots()
+    
+    y_pos = range(len(range_labels))
+    
+    # Plot bars
+    ax.barh(y_pos, range_counts_safe, color='#1BA098', label='Non-Hazardous')
+    ax.barh(y_pos, range_counts_hazardous, left=range_counts_safe, 
+            color='#DC143C', label='Potentially Hazardous')
+    
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(range_labels, fontsize=10)
+    ax.set_xlabel('Number of Asteroids', fontsize=12)
+    ax.set_title('Asteroid Size Distribution by Category', fontsize=14, fontweight='bold')
+    ax.legend(loc='upper right')
+    ax.grid(axis='x', alpha=0.3)
+    
+    # Add count labels on bars
+    for i, (safe, hazard) in enumerate(zip(range_counts_safe, range_counts_hazardous)):
+        total = safe + hazard
+        if total > 0:
+            ax.text(total + 0.5, i, str(total), va='center', fontsize=9, fontweight='bold')
+    
+    # Save to base64
+    buf = BytesIO()
+    fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
+    buf.seek(0)
+    img_base64 = base64.b64encode(buf.read()).decode('ascii')
+    buf.close()
+    
+    return f'<img src="data:image/png;base64,{img_base64}" style="max-width: 100%; height: auto;"/>'
+
+
+def create_plotly_risk_matrix(asteroids_data: List[Dict]) -> str:
+    """
+    Create interactive Plotly scatter plot showing risk assessment
+    Returns HTML string with embedded JavaScript
+    """
+    # Extract data
+    names = []
+    velocities = []
+    distances = []
+    diameters = []
+    hazardous = []
+    
+    for a in asteroids_data:
+        names.append(a.get('name', 'Unknown'))
+        
+        # Velocity
+        velocity = None
+        if 'close_approach_data' in a and len(a['close_approach_data']) > 0:
+            velocity = float(a['close_approach_data'][0].get('relative_velocity', {}).get('kilometers_per_second', 0))
+        velocities.append(velocity or a.get('relative_velocity_km_s', 0))
+        
+        # Distance
+        distance = None
+        if 'close_approach_data' in a and len(a['close_approach_data']) > 0:
+            distance = float(a['close_approach_data'][0].get('miss_distance', {}).get('astronomical', 0))
+        distances.append(distance or a.get('miss_distance_au', 0))
+        
+        # Diameter
+        diameter = None
+        if 'estimated_diameter' in a:
+            if 'kilometers' in a['estimated_diameter']:
+                diameter = a['estimated_diameter']['kilometers'].get('estimated_diameter_max', 0)
+        diameters.append(diameter or a.get('estimated_diameter_km_max', 0))
+        
+        hazardous.append(a.get('is_potentially_hazardous_asteroid', False))
+    
+    # Create Plotly figure
+    fig = go.Figure()
+    
+    # Add traces
+    colors = ['#DC143C' if h else '#1BA098' for h in hazardous]
+    
+    fig.add_trace(go.Scatter(
+        x=distances,
+        y=velocities,
+        mode='markers',
+        marker=dict(
+            size=[d * 50 for d in diameters],  # Scale diameter for visibility
+            color=colors,
+            line=dict(width=2, color='white'),
+            opacity=0.7
+        ),
+        text=[f"{name}<br>Diameter: {d:.3f} km<br>Distance: {dist:.4f} AU<br>Velocity: {vel:.2f} km/s" 
+              for name, d, dist, vel in zip(names, diameters, distances, velocities)],
+        hoverinfo='text',
+        name='Asteroids'
+    ))
+    
+    fig.update_layout(
+        title='Asteroid Risk Assessment Matrix',
+        xaxis_title='Miss Distance (AU)',
+        yaxis_title='Relative Velocity (km/s)',
+        plot_bgcolor='#F8F9FA',
+        paper_bgcolor='white',
+        font=dict(family='Arial, sans-serif', size=12),
+        hovermode='closest'
+    )
+    
+    # Convert to HTML div (no full page, just the plot)
+    return fig.to_html(full_html=False, include_plotlyjs='cdn')
+
+
+def create_danger_distribution_chart(asteroids_data: List[Dict]) -> str:
+    """
+    Create a pie chart showing hazard distribution using Plotly
+    """
+    hazardous_count = sum(1 for a in asteroids_data if a.get('is_potentially_hazardous_asteroid', False))
+    non_hazardous_count = len(asteroids_data) - hazardous_count
+    
+    fig = go.Figure(data=[go.Pie(
+        labels=['Potentially Hazardous', 'Non-Hazardous'],
+        values=[hazardous_count, non_hazardous_count],
+        marker=dict(colors=['#DC143C', '#1BA098']),
+        hole=0.4,
+        textinfo='label+percent',
+        textfont=dict(size=14)
+    )])
+    
+    fig.update_layout(
+        title='Hazard Classification Distribution',
+        plot_bgcolor='white',
+        paper_bgcolor='white',
+        font=dict(family='Arial, sans-serif')
+    )
+    
+    return fig.to_html(full_html=False, include_plotlyjs='cdn')
+
+
 # ============================================================================
 # ASTEROID DATABASE ENDPOINTS
 # ============================================================================
@@ -69,6 +262,7 @@ def get_asteroids_from_db():
     """
     return get_all_asteroids_normalized()
 
+
 @app.get("/database/asteroids/ids")
 def get_all_ids():
     """
@@ -76,6 +270,7 @@ def get_all_ids():
     Returns: JSON with array of asteroid IDs
     """
     return {"asteroid_ids": get_all_asteroid_ids()}
+
 
 @app.get("/database/asteroids/{asteroid_id}")
 def get_asteroid_by_id(asteroid_id: str):
@@ -94,6 +289,7 @@ def get_asteroid_by_id(asteroid_id: str):
         )
     
     return json.loads(result)
+
 
 # ============================================================================
 # NASA API ENDPOINT (Legacy - for direct API fetching)
@@ -127,16 +323,15 @@ def get_asteroids_from_api(date: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 # ============================================================================
-# AI ANALYSIS ENDPOINTS - NEW: HTML REPORT GENERATION
+# AI ANALYSIS ENDPOINTS - WITH VISUALIZATIONS
 # ============================================================================
 
 @app.post("/ai/report")
 async def generate_html_report(request: ReportRequest):
     """
-    Generate HTML report for selected asteroids
-    Receives: { "asteroidIds": ["id1", "id2", ...] }
-    Returns: Complete HTML document with embedded CSS
+    Generate HTML report with embedded matplotlib and Plotly visualizations
     """
     try:
         # Get asteroid data from database
@@ -147,7 +342,6 @@ async def generate_html_report(request: ReportRequest):
                 try:
                     asteroids_data.append(json.loads(result))
                 except:
-                    # If result is already a dict
                     asteroids_data.append(result)
         
         if not asteroids_data:
@@ -156,54 +350,36 @@ async def generate_html_report(request: ReportRequest):
                 detail="No asteroids found for provided IDs"
             )
         
-        # Debug: Print first asteroid structure to see what we have
-        print("First asteroid data structure:")
-        print(json.dumps(asteroids_data[0], indent=2))
+        # Generate visualizations
+        print("🎨 Generating visualizations...")
+        matplotlib_chart = create_matplotlib_chart_base64(asteroids_data)
+        plotly_risk_chart = create_plotly_risk_matrix(asteroids_data)
+        plotly_danger_pie = create_danger_distribution_chart(asteroids_data)
         
-        # Prepare asteroid summary - DEFENSIVE VERSION
+        # Prepare asteroid summary
         asteroid_summary_list = []
         for a in asteroids_data:
             try:
-                # Try to extract data safely with fallbacks
                 name = a.get('name', 'Unknown')
                 
-                # Try different possible structures for diameter
                 diameter = None
-                if 'estimated_diameter' in a:
-                    if 'kilometers' in a['estimated_diameter']:
-                        diameter = a['estimated_diameter']['kilometers'].get('estimated_diameter_max', 0)
-                    elif 'estimated_diameter_km_max' in a['estimated_diameter']:
-                        diameter = a['estimated_diameter'].get('estimated_diameter_km_max', 0)
-                elif 'estimated_diameter_km_max' in a:
-                    diameter = a.get('estimated_diameter_km_max', 0)
+                if 'estimated_diameter' in a and 'kilometers' in a['estimated_diameter']:
+                    diameter = a['estimated_diameter']['kilometers'].get('estimated_diameter_max', 0)
                 
-                # Try different possible structures for velocity
                 velocity = None
                 if 'close_approach_data' in a and len(a['close_approach_data']) > 0:
-                    if 'relative_velocity' in a['close_approach_data'][0]:
-                        velocity = a['close_approach_data'][0]['relative_velocity'].get('kilometers_per_second', 0)
-                elif 'relative_velocity_km_s' in a:
-                    velocity = a.get('relative_velocity_km_s', 0)
+                    velocity = a['close_approach_data'][0].get('relative_velocity', {}).get('kilometers_per_second', 0)
                 
-                # Try different possible structures for distance
                 distance = None
                 if 'close_approach_data' in a and len(a['close_approach_data']) > 0:
-                    if 'miss_distance' in a['close_approach_data'][0]:
-                        distance = a['close_approach_data'][0]['miss_distance'].get('astronomical', 0)
-                elif 'miss_distance_au' in a:
-                    distance = a.get('miss_distance_au', 0)
+                    distance = a['close_approach_data'][0].get('miss_distance', {}).get('astronomical', 0)
                 
-                # Get hazardous status
                 is_hazardous = a.get('is_potentially_hazardous_asteroid', False)
                 
-                # Get approach date
                 approach_date = None
                 if 'close_approach_data' in a and len(a['close_approach_data']) > 0:
                     approach_date = a['close_approach_data'][0].get('close_approach_date_full', 'Unknown')
-                elif 'close_approach_date_full' in a:
-                    approach_date = a.get('close_approach_date_full', 'Unknown')
                 
-                # Build summary string
                 summary_parts = [f"- {name}"]
                 if diameter:
                     summary_parts.append(f"{diameter:.2f} km diameter")
@@ -219,67 +395,58 @@ async def generate_html_report(request: ReportRequest):
                 
             except Exception as e:
                 print(f"Error processing asteroid: {e}")
-                # Fallback: just dump the whole object as JSON
                 asteroid_summary_list.append(f"- {json.dumps(a, indent=2)}")
         
         asteroid_summary = "\n".join(asteroid_summary_list)
         
-        print("Asteroid summary being sent to AI:")
-        print(asteroid_summary)
-        
-        # Call OpenAI to generate HTML report
+        # Call OpenAI with visualization placeholders
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
                 {
                     "role": "system",
-                    "content": """You are an expert asteroid impact analyst. Generate a professional, 
-                    clean HTML report with subtle styling. Use minimal colors - primarily white/light 
-                    backgrounds with dark text for readability. Apply accent colors sparingly only for 
-                    headers, borders, and highlights. The design should be modern, clean, and 
-                    professional - think scientific journal or government report aesthetic."""
+                    "content": """You are an expert asteroid impact analyst. Generate a professional HTML report.
+
+**IMPORTANT: Use these EXACT placeholder strings where visualizations should appear:**
+- {{MATPLOTLIB_SIZE_CHART}} - for the asteroid size distribution chart (grouped by ranges)
+- {{PLOTLY_RISK_MATRIX}} - for the interactive risk assessment scatter plot  
+- {{PLOTLY_DANGER_PIE}} - for the hazard distribution pie chart
+
+These will be replaced with actual visualizations. Do NOT generate your own charts or ASCII art.
+
+**STYLING:**
+- Clean, professional design with white/light gray backgrounds
+- Dark text (#1A1A1A) on light backgrounds
+- Accent colors: Teal (#1BA098), Red (#DC143C) for hazards
+- Modern sans-serif fonts
+- Subtle shadows and borders only
+- Responsive layout
+
+**CONTENT STRUCTURE:**
+1. Executive Summary with key statistics
+2. **INSERT {{PLOTLY_DANGER_PIE}} here** - Hazard Overview
+3. **INSERT {{MATPLOTLIB_SIZE_CHART}} here** - Size Distribution by Category
+4. **INSERT {{PLOTLY_RISK_MATRIX}} here** - Risk Assessment Matrix
+5. Individual Asteroid Analysis  
+6. Impact Scenarios (if applicable)
+7. Specific Mitigation Strategies based on asteroid characteristics
+8. Recommendations
+
+Use specific technical details. Avoid vague language."""
                 },
                 {
                     "role": "user",
-                    "content": f"""Generate a complete HTML document for an asteroid impact assessment report.
-
-**OVERALL GUIDELINES**
-- Try avoid such as, use specifics
-- Specific information for preventing specific asteroid sizes                  
-
-
-
-**STYLING REQUIREMENTS:**
-- Primary background: White (#FFFFFF) or very light gray (#F8F9FA)
-- Primary text: Dark gray or black (#1A1A1A or #2D3748)
-- Accent color (use sparingly for headers/borders): Teal (#1BA098)
-- Secondary accent (use minimally): Tan/beige (#DEB992)
-- Dark accent (for contrast): Deep blue (#051622)
-
-**DESIGN GUIDELINES:**
-- Use clean, professional typography (system fonts: -apple-system, sans-serif)
-- Subtle borders and shadows only
-- White/light card backgrounds with thin colored borders
-- Colored headers but keep body text black/dark gray
-- Tables with light gray zebra striping
-- Risk indicators can use standard red/orange/yellow/green
-- NO dark backgrounds - keep it light and readable
-- Minimal use of gradients - prefer solid colors
-- Professional spacing and padding
-- make sure the text for the header is not the same as the font for the title
-
-**CONTENT STRUCTURE:**
-1. Executive Summary (with key statistics)
-2. Individual Asteroid Analysis (one section per asteroid)
-3. Risk Assessment Matrix
-4. Impact Scenarios (if applicable)
-4. Mitigation Strategies (use specific and best practices)
-5. Recommendations
+                    "content": f"""Generate a complete HTML asteroid impact assessment report.
 
 **Asteroids to analyze:**
 {asteroid_summary}
 
-Generate a complete HTML document starting with <!DOCTYPE html> and including all necessary CSS in a <style> tag."""
+Remember to include the visualization placeholders:
+- {{{{MATPLOTLIB_SIZE_CHART}}}}
+- {{{{PLOTLY_RISK_MATRIX}}}}
+- {{{{PLOTLY_DANGER_PIE}}}}
+
+Start with <!DOCTYPE html>"""
                 }
             ],
             max_tokens=4000,
@@ -288,19 +455,20 @@ Generate a complete HTML document starting with <!DOCTYPE html> and including al
         
         html_report = response.choices[0].message.content
         
-        # Return HTML directly
-        from fastapi.responses import HTMLResponse
+        # Replace placeholders with actual visualizations
+        html_report = html_report.replace('{{MATPLOTLIB_SIZE_CHART}}', matplotlib_chart)
+        html_report = html_report.replace('{{PLOTLY_RISK_MATRIX}}', plotly_risk_chart)
+        html_report = html_report.replace('{{PLOTLY_DANGER_PIE}}', plotly_danger_pie)
+        
+        print("✅ Report generated with visualizations")
+        
         return HTMLResponse(content=html_report)
         
     except Exception as e:
-        # Enhanced error reporting
         import traceback
         error_detail = f"Failed to generate report: {str(e)}\n{traceback.format_exc()}"
-        print(error_detail)  # Print to console for debugging
-        raise HTTPException(
-            status_code=500,
-            detail=error_detail
-        )
+        print(error_detail)
+        raise HTTPException(status_code=500, detail=error_detail)
 
 
 # ============================================================================
@@ -314,7 +482,7 @@ def root():
     """
     return {
         "status": "online",
-        "api_name": "NASA NEO Data Normalizer",
+        "api_name": "NASA NEO Data Normalizer with Visualizations",
         "endpoints": {
             "database": [
                 "/database/asteroids",
@@ -322,14 +490,14 @@ def root():
                 "/database/asteroids/{asteroid_id}"
             ],
             "ai_analysis": [
-                "/ai/report (POST)",
-                "/ai/generalSummary/{ids}",
+                "/ai/report (POST)"
             ],
             "nasa_api": [
                 "/asteroids/{date}"
             ]
         }
     }
+
 
 # ============================================================================
 # RUN SERVER
@@ -339,6 +507,6 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host="127.0.0.1",
-        port=8000,
-        reload=True  # Enable hot reload for development
+        port=5000,
+        reload=True
     )
