@@ -131,15 +131,17 @@ def get_asteroids_from_api(date: str):
 # AI ANALYSIS ENDPOINTS
 # ============================================================================
 
-@app.get("/ai/generalSummary")
-def ai_generalSummary():
+@app.get("/ai/generalSummary/{ids}")
+def ai_generalSummary(ids):
+    asteroids = {}
     """
     Get AI-generated general summary of all asteroids
     Uses GPT-4 to analyze asteroid data and provide policy recommendations
     """
-    # Get all asteroids from database
-    asteroids = get_all_asteroids_normalized()
-    
+    # get data for asteroids provided from database
+    for id in ids:
+        asteroids[id] = normalize_asteroids(id)
+   
     if not asteroids:
         raise HTTPException(
             status_code=404, 
@@ -147,7 +149,7 @@ def ai_generalSummary():
         )
     
     # Prepare data for AI (limit to recent/important asteroids if too many)
-    asteroid_summary = json.dumps(asteroids[:50], indent=2)  # Limit to 50 for token limits
+    #asteroid_summary = json.dumps(asteroids[:1000], indent=2)  # Limit to 50 for token limits
     
     response = client.chat.completions.create(
         model="gpt-4o",
@@ -158,59 +160,17 @@ def ai_generalSummary():
             }, 
             {
                 "role": "user",
-                "content": f"Analyze these near-Earth asteroids and provide a summary:\n\n{asteroid_summary}"
+                "content": f"Analyze these near-Earth asteroids and provide a summary:\n\n{asteroids}"
             }
         ],
         max_tokens=1000,
         temperature=1
     )
-    
+    print(response.choices[0].message.content)
     return {
         "summary": response.choices[0].message.content,
-        "asteroids_analyzed": len(asteroids[:50]),
-        "total_asteroids": len(asteroids)
-    }
-
-
-@app.post("/ai/individualReport/{asteroid_id}")
-def ai_individualReport(asteroid_id: str):
-    """
-    Get AI-generated detailed report for a specific asteroid
-    Args:
-        asteroid_id: The neo_reference_id of the asteroid
-    """
-    # Get asteroid data
-    asteroid_json = normalize_asteroids(asteroid_id)
-    
-    if asteroid_json is None:
-        raise HTTPException(
-            status_code=404, 
-            detail=f"Asteroid with ID {asteroid_id} not found"
-        )
-    
-    asteroid_data = json.loads(asteroid_json)
-    
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {
-                "role": "system",
-                "content": "You are a professional astronomer/physicist explaining to policy makers. Discuss this asteroid's impact scenarios, predict consequences, and evaluate potential mitigation strategies. Avoid jargon where applicable."
-            }, 
-            {
-                "role": "user",
-                "content": f"Provide a detailed analysis of this asteroid:\n\n{json.dumps(asteroid_data, indent=2)}"
-            }
-        ],
-        max_tokens=1000,
-        temperature=1
-    )
-    
-    return {
-        "asteroid_id": asteroid_id,
-        "asteroid_name": asteroid_data.get("name"),
-        "report": response.choices[0].message.content,
-        "asteroid_data": asteroid_data
+        #"asteroids_analyzed": len(asteroids[:50]),
+        #"total_asteroids": len(asteroids)
     }
 
 
@@ -254,3 +214,5 @@ if __name__ == "__main__":
         port=8000,
         reload=True  # Enable hot reload for development
     )
+
+#print(ai_generalSummary([3427459, 3716631]))
